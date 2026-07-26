@@ -38,11 +38,22 @@ pub struct EbpfArgs {
 pub enum EbpfSource {
     /// Render live Linux scheduler tracepoints.
     Scheduler(SchedulerArgs),
+    /// Render live TCP retransmits and resets.
+    Tcp(TcpArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct SchedulerArgs {
     /// Save normalized scheduler events as NDJSON.
+    #[arg(long)]
+    pub record: Option<PathBuf>,
+    #[command(flatten)]
+    pub visual: VisualArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct TcpArgs {
+    /// Save normalized TCP pathology events as NDJSON.
     #[arg(long)]
     pub record: Option<PathBuf>,
     #[command(flatten)]

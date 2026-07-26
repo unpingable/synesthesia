@@ -8,6 +8,7 @@ use std::{
 
 fn main() {
     println!("cargo:rerun-if-changed=bpf/scheduler.bpf.c");
+    println!("cargo:rerun-if-changed=bpf/tcp.bpf.c");
 
     if env::var_os("CARGO_FEATURE_EBPF").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
@@ -18,6 +19,9 @@ fn main() {
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must set OUT_DIR"))
         .join("scheduler.bpf.o");
     compile_bpf(Path::new("bpf/scheduler.bpf.c"), &output);
+    let output =
+        PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must set OUT_DIR")).join("tcp.bpf.o");
+    compile_bpf(Path::new("bpf/tcp.bpf.c"), &output);
 }
 
 fn compile_bpf(source: &Path, output: &Path) {

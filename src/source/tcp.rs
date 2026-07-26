@@ -12,7 +12,7 @@ pub const TCP_KERNEL_EVENT_BYTES: usize = 56;
 pub const AF_INET: u8 = 2;
 pub const AF_INET6: u8 = 10;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum TcpPathologyKind {
     Retransmit = 1,
@@ -33,7 +33,7 @@ impl TryFrom<u8> for TcpPathologyKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum TcpAddressFamily {
     Ipv4,
     Ipv6,

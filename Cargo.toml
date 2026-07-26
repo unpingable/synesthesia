@@ -22,6 +22,11 @@ name = "synesthesia-scheduler-collector"
 path = "src/bin/synesthesia-scheduler-collector.rs"
 required-features = ["ebpf"]
 
+[[bin]]
+name = "synesthesia-tcp-collector"
+path = "src/bin/synesthesia-tcp-collector.rs"
+required-features = ["ebpf"]
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }

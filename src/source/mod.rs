@@ -13,6 +13,10 @@ pub mod scheduler_ipc;
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
 pub mod scheduler_live;
 pub mod tcp;
+pub mod tcp_helper;
+pub mod tcp_ipc;
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
+pub mod tcp_live;
 pub mod tshark;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

@@ -1104,4 +1104,40 @@ mod tests {
         cleanup(&left);
         cleanup(&right);
     }
+
+    #[test]
+    fn sanitized_source_fixtures_have_metadata_and_all_three_phases() {
+        for (fixture, source) in [
+            (
+                include_str!("../tests/fixtures/tcp-flight-incident.ndjson"),
+                FlightSource::Tcp,
+            ),
+            (
+                include_str!("../tests/fixtures/scheduler-flight-incident.ndjson"),
+                FlightSource::Scheduler,
+            ),
+        ] {
+            let records: Vec<NormalizedEvent> = fixture
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let metadata: Vec<_> = records
+                .iter()
+                .filter_map(|event| parse_metadata_event(event).transpose())
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(metadata.len(), 2);
+            assert_eq!(metadata[0].record, "start");
+            assert_eq!(metadata[1].record, "end");
+            assert!(metadata.iter().all(|record| record.source == source));
+            for phase in ["pre", "trigger", "post"] {
+                assert!(records.iter().any(|event| {
+                    event
+                        .labels
+                        .get(PHASE_LABEL)
+                        .is_some_and(|value| value == phase)
+                }));
+            }
+        }
+    }
 }

@@ -1,6 +1,7 @@
 use crate::{
     cli::{DisplayMode, ViewKind},
     event::Direction,
+    flight_recorder::{FlightState, FlightStatus},
     model::{Activity, ModelSnapshot, TcpMetrics},
     render::{Cell, RenderFrame},
     source::stable_hash,
@@ -20,6 +21,7 @@ pub struct ViewOptions {
     pub kernel_dropped: u64,
     pub collector_dropped: u64,
     pub ipc_dropped: u64,
+    pub flight: Option<FlightStatus>,
     pub help: bool,
 }
 
@@ -37,7 +39,7 @@ pub fn compose(
             ViewKind::Waterfall => waterfall(snapshot, &mut frame, field_height, options),
         }
     }
-    let status = if options.help {
+    let mut status = if options.help {
         " q/esc quit  space pause  1 weather  2 waterfall  a ascii/ansi  c theme  +/- gain  [] decay "
             .to_owned()
     } else if let Some(tcp) = &snapshot.metrics.tcp {
@@ -58,8 +60,39 @@ pub fn compose(
         )
         .to_lowercase()
     };
+    if let Some(flight) = &options.flight {
+        status = format!(" {} |{}", flight_status(flight), status);
+    }
     frame.write_status(&status);
     frame
+}
+
+fn flight_status(status: &FlightStatus) -> String {
+    match status.state {
+        FlightState::Disarmed => "rec off".to_owned(),
+        FlightState::Armed => format!(
+            "rec armed pre {:.1}s evict {}",
+            status.retained_duration, status.pre_trigger_evictions
+        ),
+        FlightState::CapturingTail => format!(
+            "rec triggered {} tail {:.1}/{:.1}s",
+            status.trigger_kind.as_deref().unwrap_or("unknown"),
+            status.tail_elapsed.min(status.tail_duration),
+            status.tail_duration
+        ),
+        FlightState::Complete => format!("rec saved {}", short_path(&status.output)),
+        FlightState::Cancelled => "rec cancelled".to_owned(),
+        FlightState::Failed => "rec failed".to_owned(),
+    }
+}
+
+fn short_path(path: &std::path::Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("incident.ndjson")
+        .chars()
+        .take(28)
+        .collect()
 }
 
 fn tcp_status(
@@ -575,6 +608,7 @@ mod tests {
             kernel_dropped: 0,
             collector_dropped: 0,
             ipc_dropped: 0,
+            flight: None,
             help: false,
         }
     }
@@ -815,5 +849,26 @@ mod tests {
         assert_eq!(model.snapshot().activity.len(), 4_096);
         model.advance(2.0);
         assert!(model.snapshot().activity.is_empty());
+    }
+
+    #[test]
+    fn flight_status_is_restrained_and_precedes_source_metrics() {
+        let mut flight_options = options(ViewKind::Weather, DisplayMode::Ascii);
+        flight_options.flight = Some(FlightStatus {
+            state: FlightState::Armed,
+            retained_events: 40,
+            retained_bytes: 8_000,
+            retained_duration: 8.4,
+            pre_trigger_evictions: 12,
+            tail_elapsed: 0.0,
+            tail_duration: 5.0,
+            trigger_kind: None,
+            output: std::path::PathBuf::from("incident.ndjson"),
+        });
+        let rendered = compose(&tcp_fixture_snapshot(), 100, 30, &flight_options).plain_text();
+        let status = rendered.lines().last().unwrap();
+        assert!(status.starts_with(" rec armed pre 8.4s evict 12 |"));
+        assert!(status.contains("tcp/s"));
+        assert!(!status.contains('@'));
     }
 }

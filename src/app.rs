@@ -275,6 +275,7 @@ fn print_snapshot(
         kernel_dropped: losses.kernel,
         collector_dropped: losses.collector,
         ipc_dropped: losses.ipc,
+        flight: None,
         help: false,
     };
     let frame = compose(&model.snapshot(), visual.width, visual.height, &options);
@@ -335,6 +336,7 @@ fn run_interactive(producer: Producer, visual: VisualArgs) -> Result<()> {
             kernel_dropped: producer_stats.kernel_dropped.load(Ordering::Relaxed),
             collector_dropped: producer_stats.collector_dropped.load(Ordering::Relaxed),
             ipc_dropped: producer_stats.ipc_dropped.load(Ordering::Relaxed),
+            flight: None,
             help: state.help,
         };
         let frame = compose(&model.snapshot(), width, height, &options);
@@ -599,6 +601,7 @@ mod tests {
             kernel_dropped: 0,
             collector_dropped: 0,
             ipc_dropped: 0,
+            flight: None,
             help: false,
         };
         let composed = compose(&model.snapshot(), 60, 18, &options);

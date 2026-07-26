@@ -10,4 +10,5 @@ pub mod recording;
 pub mod render;
 pub mod source;
 pub mod terminal;
+pub mod trigger;
 pub mod view;

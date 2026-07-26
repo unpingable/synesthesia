@@ -2,7 +2,7 @@ use crate::{
     cli::{DisplayMode, ViewKind},
     event::Direction,
     flight_recorder::{FlightState, FlightStatus},
-    model::{Activity, ModelSnapshot, TcpMetrics},
+    model::{Activity, ModelSnapshot, Particle, ParticleStyle, TcpMetrics},
     render::{Cell, RenderFrame},
     source::stable_hash,
 };
@@ -22,6 +22,7 @@ pub struct ViewOptions {
     pub collector_dropped: u64,
     pub ipc_dropped: u64,
     pub flight: Option<FlightStatus>,
+    pub particles: bool,
     pub help: bool,
 }
 
@@ -38,13 +39,16 @@ pub fn compose(
             ViewKind::Weather => weather(snapshot, &mut frame, field_height, options),
             ViewKind::Waterfall => waterfall(snapshot, &mut frame, field_height, options),
         }
+        if options.particles {
+            particle_overlay(snapshot, &mut frame, field_height, options);
+        }
     }
     let mut status = if options.help {
         if options.flight.is_some() {
-            " t trigger  x cancel  q/esc cancel-or-finalize  space pause  1/2 view  a mode  c theme "
+            " t trigger  x cancel  q/esc cancel-or-finalize  space pause  1/2 view  a mode  c theme  p particles "
                 .to_owned()
         } else {
-            " q/esc quit  space pause  1 weather  2 waterfall  a ascii/ansi  c theme  +/- gain  [] decay "
+            " q/esc quit  space pause  1 weather  2 waterfall  a ascii/ansi  c theme  p particles  +/- gain  [] decay "
                 .to_owned()
         }
     } else if let Some(tcp) = &snapshot.metrics.tcp {
@@ -83,6 +87,59 @@ pub fn compose(
     }
     frame.write_status(&status);
     frame
+}
+
+fn particle_overlay(
+    snapshot: &ModelSnapshot,
+    frame: &mut RenderFrame,
+    field_height: u16,
+    options: &ViewOptions,
+) {
+    let width = f64::from(frame.width.saturating_sub(1));
+    let height = f64::from(field_height.saturating_sub(1));
+    for particle in &snapshot.particles {
+        let age = (snapshot.now - particle.born).max(0.0);
+        if age > particle.lifetime {
+            continue;
+        }
+        let life = (1.0 - age / particle.lifetime).clamp(0.0, 1.0);
+        let x = particle.origin_x + particle.velocity_x * age;
+        let y = (particle.origin_y + particle.velocity_y * age).rem_euclid(1.0);
+        let intensity = (particle.energy * (life * life) as f32 * options.gain).clamp(0.04, 0.92);
+        frame.put_overlay(
+            (x * width).round() as i32,
+            (y * height).round() as i32,
+            particle_cell(particle, intensity, options.mode),
+        );
+    }
+}
+
+fn particle_cell(particle: &Particle, intensity: f32, mode: DisplayMode) -> Cell {
+    let phase = ((particle.seed >> 17) & 3) as usize;
+    let glyph = match (mode, particle.style) {
+        (DisplayMode::Ascii, ParticleStyle::Ember) => ['.', ',', '\'', '`'][phase],
+        (DisplayMode::Ascii, ParticleStyle::Fracture) => ['/', '\\', '*', '+'][phase],
+        (DisplayMode::Ascii, ParticleStyle::Impact) => ['x', '*', '+', 'x'][phase],
+        (DisplayMode::Ascii, ParticleStyle::Migration) => match particle.direction {
+            Direction::Inbound => '<',
+            Direction::Outbound => '>',
+            Direction::Neutral | Direction::Unknown => '+',
+        },
+        (DisplayMode::Ansi, ParticleStyle::Ember) => ['·', '∙', '•', '✦'][phase],
+        (DisplayMode::Ansi, ParticleStyle::Fracture) => ['╱', '╲', '✦', '∗'][phase],
+        (DisplayMode::Ansi, ParticleStyle::Impact) => ['◆', '✕', '✦', '◇'][phase],
+        (DisplayMode::Ansi, ParticleStyle::Migration) => match particle.direction {
+            Direction::Inbound => '◂',
+            Direction::Outbound => '▸',
+            Direction::Neutral | Direction::Unknown => '◆',
+        },
+    };
+    Cell {
+        glyph,
+        intensity,
+        category: particle.category,
+        direction: particle.direction,
+    }
 }
 
 fn clean_zero(value: f64) -> f64 {
@@ -667,6 +724,7 @@ mod tests {
             collector_dropped: 0,
             ipc_dropped: 0,
             flight: None,
+            particles: true,
             help: false,
         }
     }
@@ -957,5 +1015,76 @@ mod tests {
                 .count()
                 > 10
         }));
+    }
+
+    #[test]
+    fn particle_layer_is_deterministic_and_can_be_disabled_without_touching_the_field() {
+        let snapshot = tcp_fixture_snapshot();
+        let with_particles = compose(
+            &snapshot,
+            100,
+            30,
+            &options(ViewKind::Weather, DisplayMode::Ascii),
+        );
+        let mut disabled = options(ViewKind::Weather, DisplayMode::Ascii);
+        disabled.particles = false;
+        let without_particles = compose(&snapshot, 100, 30, &disabled);
+        assert_ne!(with_particles, without_particles);
+        assert_eq!(
+            with_particles,
+            compose(
+                &snapshot,
+                100,
+                30,
+                &options(ViewKind::Weather, DisplayMode::Ascii)
+            )
+        );
+
+        let mut no_particle_snapshot = snapshot.clone();
+        no_particle_snapshot.particles.clear();
+        assert_eq!(
+            without_particles,
+            compose(&no_particle_snapshot, 100, 30, &disabled)
+        );
+    }
+
+    #[test]
+    fn ascii_and_ansi_particles_use_materially_different_glyphs() {
+        let mut snapshot = tcp_fixture_snapshot();
+        snapshot.activity.clear();
+        let ascii = compose(
+            &snapshot,
+            100,
+            30,
+            &options(ViewKind::Weather, DisplayMode::Ascii),
+        );
+        let ansi = compose(
+            &snapshot,
+            100,
+            30,
+            &options(ViewKind::Weather, DisplayMode::Ansi),
+        );
+        let differing = ascii
+            .cells
+            .iter()
+            .zip(&ansi.cells)
+            .filter(|(left, right)| left.glyph != right.glyph)
+            .count();
+        assert!(differing >= 8);
+        assert!(ascii.plain_text().is_ascii());
+        assert!(!ascii.plain_text().contains('\x1b'));
+    }
+
+    #[test]
+    fn composing_particles_does_not_mutate_model_state() {
+        let model_snapshot = snapshot();
+        let before = model_snapshot.clone();
+        let _ = compose(
+            &model_snapshot,
+            80,
+            24,
+            &options(ViewKind::Waterfall, DisplayMode::Ascii),
+        );
+        assert_eq!(model_snapshot, before);
     }
 }

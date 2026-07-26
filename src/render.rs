@@ -55,6 +55,14 @@ impl RenderFrame {
         }
     }
 
+    pub fn put_overlay(&mut self, x: i32, y: i32, cell: Cell) {
+        if x < 0 || y < 0 || x >= i32::from(self.width) || y >= i32::from(self.height) {
+            return;
+        }
+        let index = y as usize * usize::from(self.width) + x as usize;
+        self.cells[index] = cell;
+    }
+
     pub fn write_status(&mut self, status: &str) {
         if self.height == 0 {
             return;

@@ -13,8 +13,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
 use crate::{
     cli::{
-        DemoArgs, DisplayMode, InputFormat, ReplayArgs, SchedulerArgs, StdinArgs, TcpArgs, Theme,
-        ViewKind, VisualArgs,
+        DemoArgs, DisplayMode, InputFormat, ParticleMode, ReplayArgs, SchedulerArgs, StdinArgs,
+        TcpArgs, Theme, ViewKind, VisualArgs,
     },
     flight_runtime::FlightRuntime,
     ingestion::{Ingress, event_buffer},
@@ -344,6 +344,7 @@ fn print_snapshot(
         collector_dropped: losses.collector,
         ipc_dropped: losses.ipc,
         flight: None,
+        particles: visual.particles == ParticleMode::On,
         help: false,
     };
     let frame = compose(&model.snapshot(), visual.width, visual.height, &options);
@@ -375,6 +376,7 @@ fn run_interactive(
         gain: 1.0,
         decay: 2.8,
         paused: false,
+        particles: visual.particles == ParticleMode::On,
         help: false,
     };
     let mut model = TemporalModel::new(state.decay);
@@ -421,6 +423,7 @@ fn run_interactive(
                 collector_dropped: producer_stats.collector_dropped.load(Ordering::Relaxed),
                 ipc_dropped: producer_stats.ipc_dropped.load(Ordering::Relaxed),
                 flight: flight.as_ref().map(FlightRuntime::status),
+                particles: state.particles,
                 help: state.help,
             };
             let frame = compose(&model.snapshot(), width, height, &options);
@@ -493,6 +496,7 @@ struct UiState {
     gain: f32,
     decay: f64,
     paused: bool,
+    particles: bool,
     help: bool,
 }
 
@@ -530,6 +534,7 @@ fn handle_key(
         KeyCode::Char('-') => state.gain = (state.gain / 1.15).max(0.2),
         KeyCode::Char('[') => state.decay = (state.decay / 1.15).max(0.2),
         KeyCode::Char(']') => state.decay = (state.decay * 1.15).min(30.0),
+        KeyCode::Char('p') => state.particles = !state.particles,
         KeyCode::Char('h' | '?') => state.help = !state.help,
         _ => {}
     }
@@ -751,6 +756,7 @@ mod tests {
             collector_dropped: 0,
             ipc_dropped: 0,
             flight: None,
+            particles: true,
             help: false,
         };
         let composed = compose(&model.snapshot(), 60, 18, &options);

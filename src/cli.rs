@@ -105,6 +105,13 @@ pub enum Theme {
     Monochrome,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum ParticleMode {
+    #[default]
+    On,
+    Off,
+}
+
 #[derive(Clone, Debug, Args)]
 pub struct VisualArgs {
     /// Rendering vocabulary.
@@ -116,6 +123,9 @@ pub struct VisualArgs {
     /// Coherent color palette.
     #[arg(long, value_enum, default_value_t)]
     pub theme: Theme,
+    /// Event-driven ember overlay.
+    #[arg(long, value_enum, default_value_t)]
+    pub particles: ParticleMode,
     /// Render one plain frame and exit.
     #[arg(long)]
     pub snapshot: bool,

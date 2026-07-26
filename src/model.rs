@@ -8,6 +8,8 @@ use crate::{
 
 const MAX_ACTIVITY: usize = 4_096;
 const MAX_FLOWS: usize = 512;
+pub const MAX_PARTICLES: usize = 2_048;
+const MAX_PARTICLES_PER_EVENT: usize = 16;
 const RATE_WINDOW_SECONDS: f64 = 1.0;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -20,6 +22,29 @@ pub struct Activity {
     pub direction: Direction,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParticleStyle {
+    Ember,
+    Fracture,
+    Impact,
+    Migration,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Particle {
+    pub born: f64,
+    pub lifetime: f64,
+    pub origin_x: f64,
+    pub origin_y: f64,
+    pub velocity_x: f64,
+    pub velocity_y: f64,
+    pub energy: f32,
+    pub category: u64,
+    pub direction: Direction,
+    pub style: ParticleStyle,
+    pub seed: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Metrics {
     pub events_per_second: f64,
@@ -28,6 +53,7 @@ pub struct Metrics {
     pub scheduler: Option<SchedulerMetrics>,
     pub tcp: Option<TcpMetrics>,
     pub flight: Option<FlightReplayMetrics>,
+    pub particle_evictions: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -60,6 +86,7 @@ pub struct ModelSnapshot {
     pub now: f64,
     pub decay_seconds: f64,
     pub activity: Vec<Activity>,
+    pub particles: Vec<Particle>,
     pub metrics: Metrics,
 }
 
@@ -75,6 +102,8 @@ pub struct TemporalModel {
     now: f64,
     decay_seconds: f64,
     activity: VecDeque<Activity>,
+    particles: VecDeque<Particle>,
+    particle_evictions: u64,
     rates: VecDeque<RateSample>,
     flows: HashMap<u64, f64>,
     flight: Option<FlightReplayMetrics>,
@@ -86,6 +115,8 @@ impl TemporalModel {
             now: 0.0,
             decay_seconds: decay_seconds.clamp(0.2, 30.0),
             activity: VecDeque::with_capacity(MAX_ACTIVITY),
+            particles: VecDeque::with_capacity(MAX_PARTICLES),
+            particle_evictions: 0,
             rates: VecDeque::with_capacity(256),
             flows: HashMap::with_capacity(MAX_FLOWS),
             flight: None,
@@ -149,6 +180,7 @@ impl TemporalModel {
             .or(event.target.as_deref())
             .unwrap_or(&event.category);
         let lane = stable_hash(lane_material.as_bytes());
+        self.spawn_particles(&event, lane, flow, category);
         if self.activity.len() == MAX_ACTIVITY {
             self.activity.pop_front();
         }
@@ -179,6 +211,102 @@ impl TemporalModel {
         {
             self.flows.remove(&oldest);
             self.flows.insert(flow, self.now);
+        }
+    }
+
+    fn spawn_particles(&mut self, event: &NormalizedEvent, lane: u64, flow: u64, category: u64) {
+        let style = particle_style(&event.category);
+        let base = (((event.magnitude + 1.0).log2() - 7.0) * 1.5)
+            .round()
+            .clamp(0.0, MAX_PARTICLES_PER_EVENT as f64) as usize;
+        let count = match style {
+            ParticleStyle::Impact => base.max(10),
+            ParticleStyle::Migration => base.max(7),
+            ParticleStyle::Fracture => base.max(5),
+            ParticleStyle::Ember => base,
+        }
+        .min(MAX_PARTICLES_PER_EVENT);
+        if count == 0 {
+            return;
+        }
+
+        let target_hash = event
+            .target
+            .as_deref()
+            .map_or(flow.rotate_left(19), |target| {
+                stable_hash(target.as_bytes())
+            });
+        let origin_y = unit_hash(lane);
+        let target_y = unit_hash(target_hash);
+        let anchor = unit_hash(flow);
+        let base_x = match event.direction {
+            Direction::Outbound => 0.12 + anchor * 0.22,
+            Direction::Inbound => 0.88 - anchor * 0.22,
+            Direction::Neutral | Direction::Unknown => 0.18 + anchor * 0.64,
+        };
+        for index in 0..count {
+            let seed = mix64(
+                flow ^ category.rotate_left(17)
+                    ^ self.now.to_bits().rotate_left(31)
+                    ^ (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
+            );
+            let jitter_x = unit_hash(seed) - 0.5;
+            let jitter_y = unit_hash(seed.rotate_left(23)) - 0.5;
+            let lifetime = match style {
+                ParticleStyle::Impact => 0.25 + unit_hash(seed.rotate_left(7)) * 0.55,
+                ParticleStyle::Migration => 0.7 + unit_hash(seed.rotate_left(7)) * 1.1,
+                ParticleStyle::Fracture => 0.45 + unit_hash(seed.rotate_left(7)) * 1.0,
+                ParticleStyle::Ember => 0.55 + unit_hash(seed.rotate_left(7)) * 1.45,
+            }
+            .clamp(0.25, 2.0);
+            let speed = 0.08 + unit_hash(seed.rotate_left(41)) * 0.22;
+            let (velocity_x, velocity_y) = match style {
+                ParticleStyle::Impact => {
+                    let angle = unit_hash(seed.rotate_left(11)) * std::f64::consts::TAU;
+                    (angle.cos() * speed, angle.sin() * speed * 0.55)
+                }
+                ParticleStyle::Migration => {
+                    let horizontal = match event.direction {
+                        Direction::Inbound => -speed,
+                        _ => speed,
+                    };
+                    (
+                        horizontal,
+                        shortest_unit_delta(origin_y, target_y) / lifetime + jitter_y * 0.08,
+                    )
+                }
+                ParticleStyle::Fracture => {
+                    let horizontal = match event.direction {
+                        Direction::Inbound => -speed,
+                        _ => speed,
+                    };
+                    (horizontal, jitter_y * 0.3)
+                }
+                ParticleStyle::Ember => match event.direction {
+                    Direction::Inbound => (-speed, jitter_y * 0.18),
+                    Direction::Outbound => (speed, jitter_y * 0.18),
+                    Direction::Neutral | Direction::Unknown => {
+                        (jitter_x * speed, -0.03 - unit_hash(seed) * 0.12)
+                    }
+                },
+            };
+            if self.particles.len() == MAX_PARTICLES {
+                self.particles.pop_front();
+                self.particle_evictions = self.particle_evictions.saturating_add(1);
+            }
+            self.particles.push_back(Particle {
+                born: self.now,
+                lifetime,
+                origin_x: (base_x + jitter_x * 0.025).clamp(0.0, 1.0),
+                origin_y: (origin_y + jitter_y * 0.025).rem_euclid(1.0),
+                velocity_x,
+                velocity_y,
+                energy: (0.35 + (event.magnitude + 1.0).log2() as f32 / 18.0).clamp(0.35, 1.0),
+                category,
+                direction: event.direction,
+                style,
+                seed,
+            });
         }
     }
 
@@ -224,6 +352,13 @@ impl TemporalModel {
         {
             self.activity.pop_front();
         }
+        while self
+            .particles
+            .front()
+            .is_some_and(|particle| particle.born + particle.lifetime < self.now)
+        {
+            self.particles.pop_front();
+        }
         let rate_cutoff = self.now - RATE_WINDOW_SECONDS;
         while self
             .rates
@@ -250,6 +385,7 @@ impl TemporalModel {
             now: self.now,
             decay_seconds: self.decay_seconds,
             activity: self.activity.iter().cloned().collect(),
+            particles: self.particles.iter().cloned().collect(),
             metrics: Metrics {
                 events_per_second: self.rates.iter().map(|sample| sample.count).sum::<f64>()
                     / elapsed,
@@ -263,6 +399,7 @@ impl TemporalModel {
                 scheduler,
                 tcp,
                 flight: self.flight.clone(),
+                particle_evictions: self.particle_evictions,
             },
         }
     }
@@ -334,6 +471,39 @@ impl TemporalModel {
             resets_received_per_second: rate(reset_received),
             active_pathological_flows,
         })
+    }
+}
+
+fn particle_style(category: &str) -> ParticleStyle {
+    if category.contains(".reset") || category.ends_with(".exit") {
+        ParticleStyle::Impact
+    } else if category.ends_with(".migrate") {
+        ParticleStyle::Migration
+    } else if category.contains("retransmit") {
+        ParticleStyle::Fracture
+    } else {
+        ParticleStyle::Ember
+    }
+}
+
+fn unit_hash(value: u64) -> f64 {
+    (mix64(value) >> 11) as f64 / ((1_u64 << 53) - 1) as f64
+}
+
+fn mix64(mut value: u64) -> u64 {
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn shortest_unit_delta(from: f64, to: f64) -> f64 {
+    let delta = to - from;
+    if delta > 0.5 {
+        delta - 1.0
+    } else if delta < -0.5 {
+        delta + 1.0
+    } else {
+        delta
     }
 }
 
@@ -512,5 +682,98 @@ mod tests {
         assert_eq!(snapshot.metrics.events_per_second, 0.0);
         assert_eq!(snapshot.metrics.active_flows, 0);
         assert!(snapshot.metrics.tcp.is_none());
+    }
+
+    #[test]
+    fn particle_spawning_is_deterministic_and_scales_with_magnitude() {
+        let mut event = DemoSource::new(42).next().unwrap();
+        event.magnitude = 64.0;
+        let mut quiet = TemporalModel::default();
+        quiet.ingest(event.clone(), 1.0);
+        assert!(quiet.snapshot().particles.is_empty());
+
+        event.magnitude = 8_192.0;
+        let evolve = || {
+            let mut model = TemporalModel::default();
+            model.ingest(event.clone(), 1.0);
+            model.snapshot().particles
+        };
+        let first = evolve();
+        assert!(first.len() >= 8);
+        assert_eq!(first, evolve());
+    }
+
+    #[test]
+    fn particle_direction_controls_drift() {
+        let mut event = DemoSource::new(7).next().unwrap();
+        event.magnitude = 4_096.0;
+        event.direction = Direction::Outbound;
+        let mut outbound = TemporalModel::default();
+        outbound.ingest(event.clone(), 0.0);
+        assert!(
+            outbound
+                .snapshot()
+                .particles
+                .iter()
+                .all(|particle| particle.velocity_x > 0.0)
+        );
+
+        event.direction = Direction::Inbound;
+        let mut inbound = TemporalModel::default();
+        inbound.ingest(event, 0.0);
+        assert!(
+            inbound
+                .snapshot()
+                .particles
+                .iter()
+                .all(|particle| particle.velocity_x < 0.0)
+        );
+    }
+
+    #[test]
+    fn particles_expire_and_active_storage_is_hard_bounded() {
+        let mut event = DemoSource::new(9).next().unwrap();
+        event.magnitude = 65_536.0;
+        let mut model = TemporalModel::default();
+        for _ in 0..300 {
+            model.ingest(event.clone(), 0.0);
+        }
+        let saturated = model.snapshot();
+        assert_eq!(saturated.particles.len(), MAX_PARTICLES);
+        assert!(saturated.metrics.particle_evictions > 0);
+
+        model.advance(2.1);
+        assert!(model.snapshot().particles.is_empty());
+    }
+
+    #[test]
+    fn source_hints_select_distinct_particle_motion_without_changing_activity() {
+        let mut event = DemoSource::new(11).next().unwrap();
+        event.magnitude = 8_192.0;
+        event.category = "sched.migrate".to_owned();
+        event.origin = Some("cpu:0".to_owned());
+        event.target = Some("cpu:3".to_owned());
+        event.direction = Direction::Outbound;
+        let mut migration = TemporalModel::default();
+        migration.ingest(event.clone(), 0.0);
+        let migration_snapshot = migration.snapshot();
+        assert!(
+            migration_snapshot
+                .particles
+                .iter()
+                .all(|particle| particle.style == ParticleStyle::Migration)
+        );
+        assert_eq!(migration_snapshot.activity.len(), 1);
+
+        event.category = "tcp.reset.send".to_owned();
+        let mut reset = TemporalModel::default();
+        reset.ingest(event, 0.0);
+        assert!(
+            reset
+                .snapshot()
+                .particles
+                .iter()
+                .all(|particle| particle.style == ParticleStyle::Impact)
+        );
     }
 }

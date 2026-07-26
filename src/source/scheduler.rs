@@ -116,6 +116,7 @@ impl SchedulerSourceError {
         if lower.contains("permission denied")
             || lower.contains("operation not permitted")
             || lower.contains("eperm")
+            || lower.contains("insufficient ebpf permissions")
         {
             Self::InsufficientPermissions(
                 "run the built binary explicitly with sufficient BPF privileges".to_owned(),

@@ -2,9 +2,9 @@ use std::{
     io::{self, BufReader, IsTerminal},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -12,7 +12,10 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
 use crate::{
-    cli::{DemoArgs, DisplayMode, InputFormat, ReplayArgs, StdinArgs, Theme, ViewKind, VisualArgs},
+    cli::{
+        DemoArgs, DisplayMode, InputFormat, ReplayArgs, SchedulerArgs, StdinArgs, Theme, ViewKind,
+        VisualArgs,
+    },
     ingestion::{Ingress, event_buffer},
     model::TemporalModel,
     recording::{Recorder, ReplaySource},
@@ -40,11 +43,18 @@ enum Producer {
     Replay {
         replay: ReplaySource,
     },
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    Scheduler {
+        helper: crate::source::scheduler_helper::SchedulerHelper,
+        recorder: Option<Recorder>,
+    },
 }
 
 #[derive(Default)]
 struct ProducerStats {
     malformed: AtomicU64,
+    kernel_dropped: AtomicU64,
+    collector_dropped: AtomicU64,
 }
 
 pub fn run_demo(args: DemoArgs) -> Result<()> {
@@ -76,6 +86,57 @@ pub fn run_replay(args: ReplayArgs) -> Result<()> {
     let visual = args.visual.clone();
     let replay = ReplaySource::open(&args.path, args.speed)?;
     run_interactive(Producer::Replay { replay }, visual)
+}
+
+pub fn run_scheduler(args: SchedulerArgs) -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = args;
+        Err(crate::source::scheduler::SchedulerSourceError::UnsupportedOperatingSystem.into())
+    }
+    #[cfg(all(target_os = "linux", not(feature = "ebpf")))]
+    {
+        let _ = args;
+        Err(crate::source::scheduler::SchedulerSourceError::FeatureDisabled.into())
+    }
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    {
+        let helper = crate::source::scheduler_helper::SchedulerHelper::spawn()?;
+        if args.visual.snapshot || !io::stdout().is_terminal() {
+            return snapshot_scheduler(helper, args);
+        }
+        let recorder = args.record.as_deref().map(Recorder::create).transpose()?;
+        run_interactive(Producer::Scheduler { helper, recorder }, args.visual)
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
+fn snapshot_scheduler(
+    mut helper: crate::source::scheduler_helper::SchedulerHelper,
+    args: SchedulerArgs,
+) -> Result<()> {
+    let mut recorder = args.record.as_deref().map(Recorder::create).transpose()?;
+    let mut model = TemporalModel::default();
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(750);
+    while Instant::now() < deadline {
+        match helper.next_pulse() {
+            Ok(Some(pulse)) => {
+                if let Some(event) = pulse.into_normalized() {
+                    if let Some(recorder) = &mut recorder {
+                        recorder.record(&event)?;
+                    }
+                    model.ingest(event, started.elapsed().as_secs_f64());
+                }
+            }
+            Ok(None) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if let Some(recorder) = recorder {
+        recorder.finish()?;
+    }
+    print_snapshot(&model, &args.visual, 0)
 }
 
 fn snapshot_demo(args: &DemoArgs) -> Result<()> {
@@ -138,7 +199,7 @@ fn print_snapshot(model: &TemporalModel, visual: &VisualArgs, malformed: u64) ->
 fn run_interactive(producer: Producer, visual: VisualArgs) -> Result<()> {
     let (ingress, buffer) = event_buffer(CHANNEL_CAPACITY);
     let producer_stats = Arc::new(ProducerStats::default());
-    spawn_producer(producer, ingress, Arc::clone(&producer_stats));
+    let _producer_guard = spawn_producer(producer, ingress, Arc::clone(&producer_stats));
 
     let mut session = TerminalSession::enter()?;
     let truecolor = terminal_truecolor();
@@ -180,7 +241,10 @@ fn run_interactive(producer: Producer, visual: VisualArgs) -> Result<()> {
             gain: state.gain,
             paused: state.paused,
             malformed: producer_stats.malformed.load(Ordering::Relaxed),
-            dropped: buffer.dropped(),
+            dropped: buffer
+                .dropped()
+                .saturating_add(producer_stats.kernel_dropped.load(Ordering::Relaxed))
+                .saturating_add(producer_stats.collector_dropped.load(Ordering::Relaxed)),
             help: state.help,
         };
         let frame = compose(&model.snapshot(), width, height, &options);
@@ -263,8 +327,33 @@ fn handle_key(
     false
 }
 
-fn spawn_producer(producer: Producer, ingress: Ingress, stats: Arc<ProducerStats>) {
-    thread::spawn(move || match producer {
+struct ProducerGuard {
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl Drop for ProducerGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+fn spawn_producer(
+    producer: Producer,
+    ingress: Ingress,
+    stats: Arc<ProducerStats>,
+) -> ProducerGuard {
+    let stop = Arc::new(AtomicBool::new(false));
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    let worker_stop = Arc::clone(&stop);
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    let is_scheduler = matches!(&producer, Producer::Scheduler { .. });
+    #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
+    let is_scheduler = false;
+    let join = thread::spawn(move || match producer {
         Producer::Demo { seed } => {
             for generated in DemoSource::new(seed) {
                 if !ingress.submit(generated) {
@@ -315,7 +404,43 @@ fn spawn_producer(producer: Producer, ingress: Ingress, stats: Arc<ProducerStats
                     .store(replay.stats().malformed, Ordering::Relaxed);
             }
         }
+        #[cfg(all(target_os = "linux", feature = "ebpf"))]
+        Producer::Scheduler {
+            mut helper,
+            mut recorder,
+        } => {
+            while !worker_stop.load(Ordering::Acquire) {
+                match helper.next_pulse() {
+                    Ok(Some(pulse)) => {
+                        stats
+                            .kernel_dropped
+                            .store(pulse.kernel_ring_drops, Ordering::Relaxed);
+                        stats
+                            .collector_dropped
+                            .store(pulse.collector_drops, Ordering::Relaxed);
+                        if let Some(incoming) = pulse.into_normalized() {
+                            if let Some(recorder) = &mut recorder {
+                                let _ = recorder.record(&incoming);
+                            }
+                            ingress.submit(incoming);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        stats.malformed.fetch_add(1, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+            if let Some(recorder) = recorder {
+                let _ = recorder.finish();
+            }
+        }
     });
+    ProducerGuard {
+        stop,
+        join: is_scheduler.then_some(join),
+    }
 }
 
 fn terminal_color() -> bool {

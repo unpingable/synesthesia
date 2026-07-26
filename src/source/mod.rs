@@ -8,6 +8,10 @@ pub mod demo;
 pub mod lines;
 pub mod ndjson;
 pub mod scheduler;
+pub mod scheduler_helper;
+pub mod scheduler_ipc;
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
+pub mod scheduler_live;
 pub mod tshark;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

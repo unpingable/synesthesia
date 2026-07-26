@@ -22,8 +22,31 @@ pub enum Command {
     Stdin(StdinArgs),
     /// Replay a normalized NDJSON recording.
     Replay(ReplayArgs),
+    /// Experimental Linux kernel activity sources.
+    Ebpf(EbpfArgs),
     /// Print the supported NDJSON wire schema and an example.
     Schema,
+}
+
+#[derive(Debug, Args)]
+pub struct EbpfArgs {
+    #[command(subcommand)]
+    pub source: EbpfSource,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EbpfSource {
+    /// Render live Linux scheduler tracepoints.
+    Scheduler(SchedulerArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SchedulerArgs {
+    /// Save normalized scheduler events as NDJSON.
+    #[arg(long)]
+    pub record: Option<PathBuf>,
+    #[command(flatten)]
+    pub visual: VisualArgs,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]

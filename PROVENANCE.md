@@ -82,6 +82,7 @@ under human direction and live qualification:
 - `417a7cd` — add tcp pathology event source boundary
 - `1a022c4` — add live ebpf tcp pathology capture
 - `1a70ac7` — tune tcp pathology terminal weather
+- `cd2f928` — harden experimental tcp pathology source
 
 The original checked-in C tracepoint sensor and Rust helper integration use
 Aya as an ordinary third-party dependency. They do not copy Wireshark,
@@ -94,6 +95,33 @@ All three selected tracepoints attached successfully on the development host:
 checked-in raw TSV and normalized NDJSON fixtures are synthetic and sanitized,
 using only documentation-range addresses. They contain no captured host
 addresses, payloads, process data, usernames, or application metadata.
+
+### Experimental flight-recorder campaign
+
+Lead collaboration: OpenAI Codex.
+
+A later local research campaign added one bounded pre-trigger incident
+recorder for the existing scheduler and TCP semantic sources:
+
+- `658c936` — add bounded incident flight recorder
+- `b5e36ec` — add scheduler and tcp flight triggers
+- `f81518d` — integrate live incident recording
+- `ec4abd7` — qualify synesthesia flight recorder
+
+The recorder was implemented as original Rust code under human direction. It
+retains only normalized semantic events in the unprivileged renderer process;
+it does not copy tracing backends, incident-management products, or rules
+engines. No new third-party dependency was added.
+
+The checked-in scheduler and TCP flight incidents are synthetic and sanitized.
+The real live qualification recordings were kept under `/tmp` and were not
+committed because they contain live scheduler identity or endpoint data.
+Manual and automatic capture paths were qualified through both separate
+collector helpers. The controlled TCP retransmit-rate incident and scheduler
+event-rate incident both completed with zero reported kernel, collector, IPC,
+renderer, malformed-record, writer, or prehistory-eviction loss. Exact counts
+and workload caveats are preserved in
+`docs/flight-recorder-qualification.md`.
 
 ## Provenance basis and limits
 

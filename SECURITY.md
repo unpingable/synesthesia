@@ -50,6 +50,13 @@ socket contents, process arguments, TLS metadata, or application protocols.
 Endpoint addresses in a live recording may still be sensitive operational
 data; inspect recordings before sharing them.
 
+Flight-recorder incidents have the same sensitivity as ordinary normalized
+recordings: they may contain scheduler PIDs or TCP endpoint addresses even
+though they never contain payloads, process arguments, or stack traces. The
+recorder refuses existing final and partial paths. A failed capture may retain
+an explicitly suffixed `.part` file; inspect or remove it deliberately rather
+than assuming failure wrote nothing.
+
 `examples/tcp-pathology-lab.sh` is an explicit root-operated qualification
 tool, not code invoked by Synesthesia. It creates two temporary network
 namespaces and a private veth/qdisc, refuses non-root execution, never changes

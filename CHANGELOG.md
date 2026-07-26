@@ -14,6 +14,10 @@
   versioned fixed binary pulses, and four-boundary loss accounting.
 - Add stable-flow retransmit lightning, directional reset impacts, compact TCP
   rates, sanitized unprivileged replay, and a contained namespace/netem lab.
+- Add a bounded pre-trigger flight recorder for scheduler and TCP semantic
+  events with typed automatic/manual triggers and a bounded post-trigger tail.
+- Add atomic no-overwrite NDJSON incident publication, explicit loss metadata,
+  sanitized source fixtures, and unprivileged replay trigger markers.
 
 ## 0.1.0 - 2026-07-26
 

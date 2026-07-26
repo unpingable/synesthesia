@@ -81,6 +81,9 @@ docs/demo.gif        Real generated terminal recording
    path. Keep the scheduler and TCP wire protocols explicitly distinct.
 8. eBPF links and maps are ephemeral. Never pin objects, escalate privilege,
    change kernel policy, or invoke `sudo` from Synesthesia.
+9. Flight recording begins only after semantic normalization. Keep its
+   prehistory, trigger windows, writer channel, and post-trigger tail bounded;
+   never move historical retention into a privileged collector.
 
 ## What this is not
 

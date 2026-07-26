@@ -141,6 +141,57 @@ x86_64, readable kernel BTF, ring-buffer support, all three named tracepoints,
 and externally granted BPF/perf-event privilege. Live qualification used Linux
 6.8 on x86_64, Clang 18, bpftool 7.4, Aya 0.13.1, and explicit `sudo`.
 
+## Experimental flight recorder
+
+Watch the machine fail from ten seconds before it knew it was failing.
+
+```sh
+sudo ./target/release/synesthesia ebpf tcp \
+  --flight-recorder incident.ndjson \
+  --pre-trigger 10s \
+  --post-trigger 5s
+
+./target/release/synesthesia replay incident.ndjson --speed 0.2
+```
+
+The same options compose with `ebpf scheduler`. While armed, Synesthesia keeps
+only a rolling window of normalized semantic events—not raw tracepoints—and
+does not create the output file. An automatic source-specific trigger freezes
+that bounded history, records one trigger marker, streams a bounded tail, and
+publishes one self-contained NDJSON incident. Press `t` to trigger manually or
+`x` to cancel before a trigger.
+
+The TCP default fires when retransmit semantic-event rate reaches 100/s in at
+least two of three 250 ms windows. The scheduler default uses 15,000 scheduler
+semantic events/s with the same debounce. Explicit triggers are:
+
+```text
+manual
+tcp-retransmit-rate=100
+tcp-reset
+scheduler-event-rate=15000
+scheduler-migration-rate=1000
+```
+
+These thresholds describe observations, not diagnoses. A retransmit-rate
+trigger does not claim congestion; a scheduler-event-rate trigger does not
+claim CPU saturation. One incident is captured per run. Existing output and
+`.part` paths are refused, history is capped at 100,000 events and 32 MiB, and
+kernel, collector, IPC, renderer, history-eviction, malformed-input, and
+recording-writer losses remain separate in metadata. No packet payload or
+process argument is added.
+
+`q`, Escape, or Ctrl-C cancels cleanly while armed. After a trigger, the same
+actions publish the valid tail captured so far with an `interrupted`
+termination. A normal tail is flushed, synchronized, and atomically linked
+into place without overwriting an existing file; failures preserve the
+`.part` file for inspection. Replay is unprivileged and identifies `PRE`,
+`TRIGGER`, and `POST` with a stable trigger marker.
+
+The [local qualification record](docs/flight-recorder-qualification.md)
+includes the exact controlled commands, retained event counts, loss counters,
+cleanup checks, and the limits of the workload interpretation.
+
 ## Inputs, recordings, and replay
 
 ```sh
@@ -170,7 +221,8 @@ history through category and stable-flow bands. Both accept `--mode ascii` or
 
 `q`/Escape quits, Space pauses, `1`/`2` selects a view, `a` toggles rendering,
 `c` changes theme, `+`/`-` changes gain, `[`/`]` changes persistence, and
-`h`/`?` shows help.
+`h`/`?` shows help. While a flight recorder is armed, `t` triggers manually
+and `x` cancels without writing.
 
 For plain, deterministic output:
 
@@ -192,6 +244,7 @@ snapshots contain printable ASCII and newlines only.
 - not a replacement for Wireshark
 - not a scheduler profiler or complete causality model
 - not a TCP connection tracker, packet capture, or diagnosis of retransmit cause
+- not an incident manager, retention service, rules engine, or alerting system
 - not yet a stable wire protocol beyond the documented v1 behavior
 
 See [the design notes](docs/design.md) for boundaries and bounded-memory

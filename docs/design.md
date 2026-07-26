@@ -181,3 +181,69 @@ The closed-port phase produced a received-reset impact, and the following
 10-second settle emitted no lab-flow pathology. In total, 5,835 raw lab events
 became 116 semantic pulses; the largest 33 ms bucket contained 141 events.
 The namespace and veth cleanup check was empty and no lab process remained.
+
+## Bounded incident flight recorder
+
+Flight recording begins after the helper has produced normalized semantic
+pulses and before the ordinary nonblocking renderer submission:
+
+```text
+fixed helper pulse -> NormalizedEvent -> bounded recorder command channel
+                                     \-> bounded renderer channel -> model
+
+recorder worker -> rolling pre-trigger deque -> trigger marker
+                -> streaming post-trigger writer -> atomic NDJSON publish
+```
+
+This placement keeps JSON and retention out of the kernel and privileged
+collector. It also means trigger policy observes exactly the semantic pulses
+available to the instrument, including each pulse's bounded aggregate count.
+The renderer can drop decorative delivery independently without erasing the
+recorder's own distinct accounting.
+
+The explicit states are `Disarmed`, `Armed`, `CapturingTail`, `Complete`,
+`Cancelled`, and `Failed`. `arm` is the only transition from `Disarmed`.
+`Armed` retains and evicts; one manual or automatic trigger moves to
+`CapturingTail`; a monotonic deadline or early interruption publishes
+`Complete`. Cancelling while armed writes nothing. Illegal transitions are
+errors rather than implicit mode changes.
+
+Pre-trigger retention is bounded three ways: requested monotonic duration,
+100,000 events, and 32 MiB of estimated encoded records. The duration is
+capped at 30 seconds. Time expiry and capacity eviction both remove the oldest
+event deterministically; capacity eviction has its own counter and the actual
+oldest-to-trigger duration is stored. Post-trigger duration is capped at 30
+seconds and defaults to five.
+
+The recorder owns a separate 4,096-message bounded channel and worker. Live
+producer threads use nonblocking sends. Saturation increments writer loss and
+does not stall a collector or tracepoint. The worker writes prehistory once at
+trigger time, then streams post-trigger events through a fixed 64 KiB
+`BufWriter`; it never accumulates the completed incident in memory.
+
+The self-contained format remains valid NDJSON v1. Reserved
+`synesthesia.flight.metadata` start/end records describe flight format version
+1, source, clocks, trigger, configured and actual durations, event counts,
+termination, host kernel/architecture, and each loss boundary.
+`synesthesia.flight.trigger` is the one phase marker. Ordinary events receive
+only the bounded label `synesthesia.flight.phase=pre|post`. Replay validates
+metadata versions, keeps metadata out of weather activity, exposes recorded
+losses in status, and renders the trigger as a stable vertical marker.
+
+Automatic triggers are deliberately typed, not an expression language.
+TCP retransmit, scheduler event, and scheduler migration rates use fixed
+250 ms windows and fire after at least two of the three most recently
+completed windows meet the threshold. A sent or received TCP reset can trigger
+immediately. Manual triggering is always available while armed, and a session
+fires at most once.
+
+No final path exists while armed. Triggering creates
+`incident.ndjson.part` with exclusive creation. Completion flushes and syncs
+the file, then uses a no-clobber hard link as the atomic publication step and
+removes the partial link. Existing final or partial paths are refused. A write
+or publication failure never claims success and preserves a partial file when
+one exists.
+
+The controlled live results, including exact counts and interpretation limits,
+are recorded in
+[flight-recorder-qualification.md](flight-recorder-qualification.md).

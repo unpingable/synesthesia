@@ -23,11 +23,25 @@ Reports are especially useful when they involve:
 - unsafe handling of recording or replay files;
 - mistakes around privilege boundaries.
 
-Synesthesia itself does not require capture privileges and does not perform
-packet capture. External producers such as `tshark` may require elevated
-privileges depending on the host. Keep those privileges confined to the
-producer; piping its output into Synesthesia does not grant Synesthesia a need
-for root access.
+Network and generic-input modes do not require capture privileges and do not
+perform packet capture. External producers such as `tshark` may require
+elevated privileges depending on the host.
+
+The experimental scheduler source is different: its separate Linux collector
+must load BPF programs and attach perf-event tracepoints. Synesthesia never
+invokes `sudo`, changes sysctls, mounts tracefs, weakens lockdown or
+unprivileged-BPF policy, installs capabilities, or creates setuid programs.
+Users explicitly choose the credentials or capabilities supplied to the
+launcher and helper. Running `sudo synesthesia ebpf scheduler` also runs the
+launcher with those credentials; the process boundary is not a privilege-drop
+mechanism.
+
+The collector reads scheduler tracepoint fields limited to timestamps, CPU
+IDs, PIDs, previous state, and task movement. It does not collect command
+arguments, paths, environments, stack traces, or payloads. Reports involving
+malformed helper records, verifier/error misclassification, ring-buffer or
+pipe exhaustion, lingering attachments, or privilege-boundary mistakes are
+particularly relevant.
 
 ## Supported versions
 

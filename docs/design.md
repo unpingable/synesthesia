@@ -87,3 +87,22 @@ The renderer materializes those already-normalized pulses as the existing
 fixture, recording, and replay representation. Task identities are compact
 PID labels and are not retained in an unbounded task table. Migration becomes
 paired departure/arrival pulses so both CPU regions react.
+
+Live qualification used Linux `6.8.0-136-generic` on x86_64 with readable
+`/sys/kernel/btf/vmlinux`, Clang 18.1.3, bpftool/libbpf 7.4/1.4, Aya 0.13.1,
+no kernel lockdown, and explicit root privilege. The qualified kernel names
+the shared wakeup BTF context `trace_event_raw_sched_wakeup_template`; CO-RE
+relocation resolves that type for both wakeup tracepoints. This is not a claim
+of support for every vendor kernel or architecture.
+
+The launcher waits for the helper's first binary pulse before entering raw
+terminal mode, so permission, BTF, verifier, tracepoint, and ring-buffer setup
+failures leave the shell untouched. Dropping the helper kills and waits for
+the child; dropping Aya then closes ephemeral links, programs, maps, and ring
+buffers. Nothing is pinned under `/sys/fs/bpf`.
+
+The live visual check covered idle, one pinned CPU worker, six all-core workers,
+short burst workers, and settling. The states were appreciably different, but
+concurrent Lean and Rust builds were also active, so this is a qualitative
+instrument check rather than a controlled scheduler benchmark. The recorded
+session reported zero kernel, collector, and renderer-channel losses.

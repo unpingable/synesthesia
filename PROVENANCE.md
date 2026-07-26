@@ -49,6 +49,28 @@ The tshark adapter was fixture-tested during initial qualification because
 `tshark` was unavailable on the build host. The exact TSV fixture and parser
 remain in the repository.
 
+### Experimental scheduler campaign
+
+Lead collaboration: OpenAI Codex.
+
+A later local research campaign added one narrow Linux scheduler source under
+human direction and live qualification:
+
+- `d795617` — add scheduler event source boundary
+- `16f291f` — add live ebpf scheduler capture
+- `a9ac4c9` — tune scheduler terminal weather
+
+The implementation uses a checked-in, original C tracepoint sensor and an
+AI-assisted Rust collector/renderer integration. It does not copy Cava,
+Wireshark, bpftrace, libbpf examples, or Aya examples. Aya is used as an
+ordinary third-party dependency under its own license.
+
+Live qualification on the development host exposed and corrected a kernel-BTF
+type-name mismatch for the wakeup tracepoint. All four scheduler tracepoints
+then attached successfully and produced a real ASCII snapshot. The checked-in
+`examples/scheduler.ndjson` fixture is synthetic and sanitized; it does not
+contain host process names, usernames, or unrelated machine activity.
+
 ## Provenance basis and limits
 
 This document is a functional attribution record based on commit history,

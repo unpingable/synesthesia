@@ -15,11 +15,6 @@ fn main() {
         return;
     }
 
-    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    if arch != "x86_64" {
-        panic!("the experimental eBPF source currently supports only x86_64, not {arch}");
-    }
-
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must set OUT_DIR"))
         .join("scheduler.bpf.o");
     compile_bpf(Path::new("bpf/scheduler.bpf.c"), &output);
@@ -27,16 +22,7 @@ fn main() {
 
 fn compile_bpf(source: &Path, output: &Path) {
     let status = Command::new("clang")
-        .args([
-            "-target",
-            "bpf",
-            "-D__TARGET_ARCH_x86",
-            "-O2",
-            "-g",
-            "-Wall",
-            "-Werror",
-            "-c",
-        ])
+        .args(["-target", "bpf", "-O2", "-g", "-Wall", "-Werror", "-c"])
         .arg(source)
         .arg("-o")
         .arg(output)

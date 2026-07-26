@@ -20,6 +20,11 @@ impl SchedulerHelper {
         if !cfg!(target_os = "linux") {
             return Err(SchedulerSourceError::UnsupportedOperatingSystem);
         }
+        if std::env::consts::ARCH != "x86_64" {
+            return Err(SchedulerSourceError::UnsupportedArchitecture(
+                std::env::consts::ARCH.to_owned(),
+            ));
+        }
         let path = helper_path()?;
         let mut child = Command::new(&path)
             .stdin(Stdio::null())

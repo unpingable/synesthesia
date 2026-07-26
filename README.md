@@ -53,6 +53,48 @@ producer owns those.
 
 Wireshark is analysis. This is the hallucination layer.
 
+## Experimental Linux scheduler source
+
+Build both the renderer and its Linux-only collector helper:
+
+```sh
+cargo build --release --features ebpf --bins
+sudo ./target/release/synesthesia ebpf scheduler
+```
+
+Then disturb the weather:
+
+```sh
+stress-ng --cpu "$(nproc)" --timeout 20s
+```
+
+This source is experimental, Linux-only, and currently qualified on x86_64
+Linux 6.8 with kernel BTF, Clang 18, bpftool 7.4, Aya 0.13.1, and explicit
+`sudo`. Synesthesia never invokes `sudo`, changes sysctls, mounts filesystems,
+or pins BPF objects. The one-command form above knowingly runs the launcher
+and helper with the credentials supplied by the user.
+
+The helper attaches to `sched_switch`, `sched_wakeup`,
+`sched_wakeup_new`, and `sched_migrate_task`. It captures compact scheduler
+identities and CPU movement—not command lines, arguments, paths, environment,
+stacks, or payloads. Raw records are normalized and aggregated into 33 ms
+CPU/category windows before a fixed binary stream crosses into the renderer;
+JSON is not on the live tracepoint path.
+
+Record the normalized result and replay it later without eBPF or privilege:
+
+```sh
+sudo ./target/release/synesthesia ebpf scheduler --record scheduler.ndjson
+./target/release/synesthesia replay scheduler.ndjson
+./target/release/synesthesia replay examples/scheduler.ndjson
+```
+
+The collector requires readable kernel BTF, the four tracepoints, a kernel
+with ring-buffer support, and sufficient BPF/perf-event privilege. It currently
+supports x86_64 only. A successful tracepoint event is evidence that the event
+occurred; it is not proof of complete scheduler causality, task runtime, CPU
+utilization, or why the scheduler made a decision.
+
 ## Inputs, recordings, and replay
 
 ```sh
@@ -102,6 +144,7 @@ snapshots contain printable ASCII and newlines only.
 - not alerting
 - not a browser dashboard
 - not a replacement for Wireshark
+- not a scheduler profiler or complete causality model
 - not yet a stable wire protocol beyond the documented v1 behavior
 
 See [the design notes](docs/design.md) for boundaries and bounded-memory

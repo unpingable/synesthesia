@@ -152,4 +152,26 @@ mod tests {
         );
         assert_eq!(total_delay, Duration::from_micros(2_041_500));
     }
+
+    #[test]
+    fn sanitized_tcp_fixture_replays_pathology_without_privilege() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tcp-pathology.ndjson");
+        let mut replay = ReplaySource::open(&path, 2.0).unwrap();
+        let mut categories = std::collections::BTreeSet::new();
+        let mut total_delay = Duration::ZERO;
+        while let Some((delay, event)) = replay.next_timed().unwrap() {
+            total_delay += delay;
+            categories.insert(event.category);
+        }
+        assert_eq!(
+            categories,
+            std::collections::BTreeSet::from([
+                "tcp.reset.receive".to_owned(),
+                "tcp.reset.send".to_owned(),
+                "tcp.retransmit".to_owned(),
+            ])
+        );
+        assert_eq!(total_delay, Duration::from_millis(3_525));
+    }
 }

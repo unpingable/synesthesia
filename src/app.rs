@@ -245,6 +245,7 @@ fn print_snapshot(model: &TemporalModel, visual: &VisualArgs, malformed: u64) ->
         dropped: 0,
         kernel_dropped: 0,
         collector_dropped: 0,
+        ipc_dropped: 0,
         help: false,
     };
     let frame = compose(&model.snapshot(), visual.width, visual.height, &options);
@@ -300,6 +301,7 @@ fn run_interactive(producer: Producer, visual: VisualArgs) -> Result<()> {
             dropped: buffer.dropped(),
             kernel_dropped: producer_stats.kernel_dropped.load(Ordering::Relaxed),
             collector_dropped: producer_stats.collector_dropped.load(Ordering::Relaxed),
+            ipc_dropped: producer_stats.ipc_dropped.load(Ordering::Relaxed),
             help: state.help,
         };
         let frame = compose(&model.snapshot(), width, height, &options);
@@ -563,6 +565,7 @@ mod tests {
             dropped: 0,
             kernel_dropped: 0,
             collector_dropped: 0,
+            ipc_dropped: 0,
             help: false,
         };
         let composed = compose(&model.snapshot(), 60, 18, &options);

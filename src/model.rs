@@ -25,6 +25,7 @@ pub struct Metrics {
     pub magnitude_per_second: f64,
     pub active_flows: usize,
     pub scheduler: Option<SchedulerMetrics>,
+    pub tcp: Option<TcpMetrics>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -33,6 +34,14 @@ pub struct SchedulerMetrics {
     pub wakeups_per_second: f64,
     pub migrations_per_second: f64,
     pub active_cpus: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TcpMetrics {
+    pub retransmits_per_second: f64,
+    pub resets_sent_per_second: f64,
+    pub resets_received_per_second: f64,
+    pub active_pathological_flows: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -152,6 +161,7 @@ impl TemporalModel {
             (self.now - sample.time).clamp(0.1, RATE_WINDOW_SECONDS)
         });
         let scheduler = self.scheduler_metrics(elapsed);
+        let tcp = self.tcp_metrics(elapsed);
         ModelSnapshot {
             now: self.now,
             decay_seconds: self.decay_seconds,
@@ -167,6 +177,7 @@ impl TemporalModel {
                     / elapsed,
                 active_flows: self.flows.len(),
                 scheduler,
+                tcp,
             },
         }
     }
@@ -202,6 +213,41 @@ impl TemporalModel {
             wakeups_per_second: rate(wakeup),
             migrations_per_second: rate(migrate),
             active_cpus,
+        })
+    }
+
+    fn tcp_metrics(&self, elapsed: f64) -> Option<TcpMetrics> {
+        let retransmit = stable_hash(b"tcp.retransmit");
+        let reset_sent = stable_hash(b"tcp.reset.send");
+        let reset_received = stable_hash(b"tcp.reset.receive");
+        let categories = [retransmit, reset_sent, reset_received];
+        if !self
+            .rates
+            .iter()
+            .any(|sample| categories.contains(&sample.category))
+        {
+            return None;
+        }
+        let rate = |category| {
+            self.rates
+                .iter()
+                .filter(|sample| sample.category == category)
+                .map(|sample| sample.count)
+                .sum::<f64>()
+                / elapsed
+        };
+        let active_pathological_flows = self
+            .activity
+            .iter()
+            .filter(|activity| categories.contains(&activity.category))
+            .map(|activity| activity.flow)
+            .collect::<HashSet<_>>()
+            .len();
+        Some(TcpMetrics {
+            retransmits_per_second: rate(retransmit),
+            resets_sent_per_second: rate(reset_sent),
+            resets_received_per_second: rate(reset_received),
+            active_pathological_flows,
         })
     }
 }
@@ -296,5 +342,41 @@ mod tests {
         assert_eq!(model.snapshot().metrics.scheduler.unwrap().active_cpus, 1);
         model.advance(2.0);
         assert!(model.snapshot().metrics.scheduler.is_none());
+    }
+
+    #[test]
+    fn tcp_metrics_use_aggregated_counts_and_distinct_pathology_categories() {
+        let lines: Vec<_> = include_str!("../tests/fixtures/tcp-pathology.ndjson")
+            .lines()
+            .collect();
+        let mut model = TemporalModel::default();
+        for (index, count) in [(1, 3.0), (5, 1.0), (6, 1.0)] {
+            let event: NormalizedEvent = serde_json::from_str(lines[index]).unwrap();
+            model.ingest(event, 1.0);
+            assert_eq!(model.rates.back().expect("rate sample").count, count);
+        }
+        let tcp = model.snapshot().metrics.tcp.unwrap();
+        assert_eq!(tcp.retransmits_per_second, 30.0);
+        assert_eq!(tcp.resets_sent_per_second, 10.0);
+        assert_eq!(tcp.resets_received_per_second, 10.0);
+        assert_eq!(tcp.active_pathological_flows, 3);
+    }
+
+    #[test]
+    fn stale_tcp_pathology_decays_to_quiet() {
+        let event: NormalizedEvent = serde_json::from_str(
+            include_str!("../tests/fixtures/tcp-pathology.ndjson")
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut model = TemporalModel::new(0.5);
+        model.ingest(event, 0.0);
+        assert!(model.snapshot().metrics.tcp.is_some());
+        model.advance(2.0);
+        let snapshot = model.snapshot();
+        assert!(snapshot.metrics.tcp.is_none());
+        assert!(snapshot.activity.is_empty());
     }
 }

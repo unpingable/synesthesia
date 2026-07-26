@@ -1,8 +1,9 @@
 use crate::{
     cli::{DisplayMode, ViewKind},
     event::Direction,
-    model::ModelSnapshot,
+    model::{Activity, ModelSnapshot, TcpMetrics},
     render::{Cell, RenderFrame},
+    source::stable_hash,
 };
 
 const ASCII_DENSITY: &[u8] = b" .:-=+*#%@";
@@ -18,6 +19,7 @@ pub struct ViewOptions {
     pub dropped: u64,
     pub kernel_dropped: u64,
     pub collector_dropped: u64,
+    pub ipc_dropped: u64,
     pub help: bool,
 }
 
@@ -38,6 +40,8 @@ pub fn compose(
     let status = if options.help {
         " q/esc quit  space pause  1 weather  2 waterfall  a ascii/ansi  c theme  +/- gain  [] decay "
             .to_owned()
+    } else if let Some(tcp) = &snapshot.metrics.tcp {
+        tcp_status(snapshot, tcp, width, options)
     } else if let Some(scheduler) = &snapshot.metrics.scheduler {
         scheduler_status(snapshot, scheduler, width, options)
     } else {
@@ -56,6 +60,49 @@ pub fn compose(
     };
     frame.write_status(&status);
     frame
+}
+
+fn tcp_status(
+    snapshot: &ModelSnapshot,
+    tcp: &TcpMetrics,
+    width: u16,
+    options: &ViewOptions,
+) -> String {
+    let state = if options.paused { " pause" } else { "" };
+    if width < 110 {
+        format!(
+            " {} tcp/s rt {} tx/rx {}/{} flow {} loss {}/{}/{}/{} {}/{}{}",
+            compact_magnitude(snapshot.metrics.events_per_second),
+            compact_magnitude(tcp.retransmits_per_second),
+            compact_magnitude(tcp.resets_sent_per_second),
+            compact_magnitude(tcp.resets_received_per_second),
+            tcp.active_pathological_flows,
+            options.kernel_dropped,
+            options.collector_dropped,
+            options.ipc_dropped,
+            options.dropped,
+            short_view(options.view),
+            short_mode(options.mode),
+            state,
+        )
+    } else {
+        format!(
+            " {} tcp/s  {} retransmit  reset tx/rx {}/{}  {} flows  loss k/c/i/u {}/{}/{}/{}  {:?}/{:?}{}",
+            compact_magnitude(snapshot.metrics.events_per_second),
+            compact_magnitude(tcp.retransmits_per_second),
+            compact_magnitude(tcp.resets_sent_per_second),
+            compact_magnitude(tcp.resets_received_per_second),
+            tcp.active_pathological_flows,
+            options.kernel_dropped,
+            options.collector_dropped,
+            options.ipc_dropped,
+            options.dropped,
+            options.view,
+            options.mode,
+            state,
+        )
+        .to_lowercase()
+    }
 }
 
 fn scheduler_status(
@@ -143,6 +190,19 @@ fn weather(
         if life <= 0.0 {
             continue;
         }
+        if let Some(pathology) = tcp_visual(activity.category) {
+            tcp_weather(
+                activity,
+                pathology,
+                age,
+                life,
+                snapshot,
+                frame,
+                field_height,
+                options,
+            );
+            continue;
+        }
         let weight = ((activity.magnitude + 1.0).log2() / 12.0).clamp(0.12, 1.35);
         let intensity = (life * weight * f64::from(options.gain)).clamp(0.03, 1.0) as f32;
         let phase = age / snapshot.decay_seconds;
@@ -193,6 +253,173 @@ fn weather(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TcpVisual {
+    Retransmit,
+    ResetSent,
+    ResetReceived,
+}
+
+fn tcp_visual(category: u64) -> Option<TcpVisual> {
+    if category == stable_hash(b"tcp.retransmit") {
+        Some(TcpVisual::Retransmit)
+    } else if category == stable_hash(b"tcp.reset.send") {
+        Some(TcpVisual::ResetSent)
+    } else if category == stable_hash(b"tcp.reset.receive") {
+        Some(TcpVisual::ResetReceived)
+    } else {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tcp_weather(
+    activity: &Activity,
+    pathology: TcpVisual,
+    age: f64,
+    life: f64,
+    snapshot: &ModelSnapshot,
+    frame: &mut RenderFrame,
+    field_height: u16,
+    options: &ViewOptions,
+) {
+    let width = f64::from(frame.width);
+    let height = f64::from(field_height);
+    let anchor = (activity.flow % 10_000) as f64 / 10_000.0;
+    let phase = age / snapshot.decay_seconds;
+    let direction = match activity.direction {
+        Direction::Inbound => -1.0,
+        _ => 1.0,
+    };
+    let center_x = width * (0.18 + anchor * 0.64) + direction * phase.min(1.5) * width * 0.08;
+    let center_y = (activity.lane % u64::from(field_height)) as f64
+        + (phase * 3.0 + anchor * 7.0).sin() * height * 0.025;
+    let weight = ((activity.magnitude + 1.0).log2() / 14.0).clamp(0.55, 1.25);
+    let intensity = (life * weight * f64::from(options.gain)).clamp(0.08, 1.0) as f32;
+
+    match pathology {
+        TcpVisual::Retransmit => {
+            let length = (9.0 + weight * 15.0).round() as i32;
+            let mut previous_y = center_y.round() as i32;
+            for step in 0..length {
+                let centered = step - length / 2;
+                let x = center_x.round() as i32 + (f64::from(centered) * direction).round() as i32;
+                let fracture = activity
+                    .flow
+                    .wrapping_add((step as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+                let y = center_y.round() as i32 + (fracture % 5) as i32 - 2;
+                let fade = 1.0 - (centered.unsigned_abs() as f32 / length as f32) * 0.55;
+                let glyph = if y > previous_y {
+                    '\\'
+                } else if y < previous_y {
+                    '/'
+                } else if step % 5 == 0 {
+                    '*'
+                } else {
+                    '-'
+                };
+                let low = previous_y.min(y);
+                let high = previous_y.max(y);
+                for bridge_y in low..=high {
+                    frame.put(
+                        x,
+                        bridge_y,
+                        pathology_cell(
+                            intensity * fade,
+                            activity,
+                            options.mode,
+                            if bridge_y == y { glyph } else { '|' },
+                        ),
+                    );
+                }
+                previous_y = y;
+            }
+        }
+        TcpVisual::ResetSent => {
+            let radius = (3.0 + weight * 4.0).round() as i32;
+            let x = center_x.round() as i32;
+            let y = center_y.round() as i32;
+            for offset in -radius..=radius {
+                let fade = 1.0 - offset.unsigned_abs() as f32 / (radius + 1) as f32;
+                frame.put(
+                    x + offset,
+                    y,
+                    pathology_cell(
+                        intensity * fade,
+                        activity,
+                        options.mode,
+                        if offset == 0 { 'X' } else { '-' },
+                    ),
+                );
+            }
+            for offset in 1..=radius / 2 + 1 {
+                frame.put(
+                    x + offset,
+                    y - offset,
+                    pathology_cell(intensity * 0.72, activity, options.mode, '/'),
+                );
+                frame.put(
+                    x + offset,
+                    y + offset,
+                    pathology_cell(intensity * 0.72, activity, options.mode, '\\'),
+                );
+            }
+        }
+        TcpVisual::ResetReceived => {
+            let radius = (3.0 + weight * 4.0).round() as i32;
+            let x = center_x.round() as i32;
+            let y = center_y.round() as i32;
+            for offset in -radius..=radius {
+                let fade = 1.0 - offset.unsigned_abs() as f32 / (radius + 1) as f32;
+                frame.put(
+                    x,
+                    y + offset,
+                    pathology_cell(
+                        intensity * fade,
+                        activity,
+                        options.mode,
+                        if offset == 0 { '!' } else { '|' },
+                    ),
+                );
+            }
+            for offset in 1..=radius {
+                frame.put(
+                    x - offset,
+                    y,
+                    pathology_cell(intensity * 0.62, activity, options.mode, '<'),
+                );
+            }
+        }
+    }
+}
+
+fn pathology_cell(
+    intensity: f32,
+    activity: &Activity,
+    mode: DisplayMode,
+    ascii_glyph: char,
+) -> Cell {
+    let glyph = match mode {
+        DisplayMode::Ascii => ascii_glyph,
+        DisplayMode::Ansi => match ascii_glyph {
+            '/' => '╱',
+            '\\' => '╲',
+            '-' => '━',
+            '|' => '┃',
+            'X' => '✕',
+            '!' => '◆',
+            '<' => '◀',
+            other => other,
+        },
+    };
+    Cell {
+        glyph,
+        intensity: intensity.clamp(0.0, 1.0),
+        category: activity.category,
+        direction: activity.direction,
+    }
+}
+
 fn waterfall(
     snapshot: &ModelSnapshot,
     frame: &mut RenderFrame,
@@ -219,6 +446,51 @@ fn waterfall(
             i32::from(y),
             visual_cell(intensity, category, activity.direction, options.mode),
         );
+        if let Some(pathology) = tcp_visual(category) {
+            match pathology {
+                TcpVisual::Retransmit => {
+                    let offset = (activity.flow % 3) as i32 - 1;
+                    frame.put(
+                        x.saturating_sub(1),
+                        i32::from(y) + offset,
+                        pathology_cell(intensity * 0.8, activity, options.mode, '/'),
+                    );
+                    frame.put(
+                        x.saturating_add(1),
+                        i32::from(y) - offset,
+                        pathology_cell(intensity * 0.8, activity, options.mode, '\\'),
+                    );
+                }
+                TcpVisual::ResetSent => {
+                    for offset in -2..=2 {
+                        frame.put(
+                            x + offset,
+                            i32::from(y),
+                            pathology_cell(
+                                intensity,
+                                activity,
+                                options.mode,
+                                if offset == 0 { 'X' } else { '-' },
+                            ),
+                        );
+                    }
+                }
+                TcpVisual::ResetReceived => {
+                    for offset in -2..=2 {
+                        frame.put(
+                            x,
+                            i32::from(y) + offset,
+                            pathology_cell(
+                                intensity,
+                                activity,
+                                options.mode,
+                                if offset == 0 { '!' } else { '|' },
+                            ),
+                        );
+                    }
+                }
+            }
+        }
         if activity.magnitude > 900.0 {
             frame.put(
                 x,
@@ -302,6 +574,7 @@ mod tests {
             dropped: 0,
             kernel_dropped: 0,
             collector_dropped: 0,
+            ipc_dropped: 0,
             help: false,
         }
     }
@@ -440,5 +713,107 @@ mod tests {
             .filter(|(left, right)| left.glyph != right.glyph)
             .count();
         assert!(differing > 150);
+    }
+
+    fn tcp_fixture_snapshot() -> ModelSnapshot {
+        let mut model = TemporalModel::default();
+        for line in include_str!("../tests/fixtures/tcp-pathology.ndjson").lines() {
+            let event: NormalizedEvent = serde_json::from_str(line).unwrap();
+            let now = event.timestamp.unwrap();
+            model.ingest(event, now);
+        }
+        model.snapshot()
+    }
+
+    #[test]
+    fn tcp_fixture_snapshot_is_deterministic_with_clean_loss_status() {
+        let mut tcp_options = options(ViewKind::Weather, DisplayMode::Ascii);
+        tcp_options.kernel_dropped = 2;
+        tcp_options.collector_dropped = 3;
+        tcp_options.ipc_dropped = 4;
+        tcp_options.dropped = 5;
+        let render = || compose(&tcp_fixture_snapshot(), 100, 30, &tcp_options).plain_text();
+        let first = render();
+        assert_eq!(first, render());
+        let status = first.lines().last().unwrap();
+        assert!(status.contains("tcp/s"));
+        assert!(status.contains("loss 2/3/4/5"));
+        assert!(!status.contains('@'));
+    }
+
+    #[test]
+    fn retransmit_and_resets_have_distinct_ascii_impact_grammar() {
+        let base: NormalizedEvent = serde_json::from_str(
+            include_str!("../tests/fixtures/tcp-pathology.ndjson")
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let render = |category: &str, direction: Direction| {
+            let mut event = base.clone();
+            event.category = category.to_owned();
+            event.direction = direction;
+            let mut model = TemporalModel::default();
+            model.ingest(event, 0.0);
+            compose(
+                &model.snapshot(),
+                80,
+                24,
+                &options(ViewKind::Weather, DisplayMode::Ascii),
+            )
+            .plain_text()
+        };
+        let retransmit = render("tcp.retransmit", Direction::Outbound);
+        let sent = render("tcp.reset.send", Direction::Outbound);
+        let received = render("tcp.reset.receive", Direction::Inbound);
+        assert!(retransmit.contains('/') || retransmit.contains('\\'));
+        assert!(sent.contains('X'));
+        assert!(received.contains('!'));
+        assert_ne!(retransmit, sent);
+        assert_ne!(sent, received);
+    }
+
+    #[test]
+    fn retransmit_strike_occupies_its_stable_flow_lane() {
+        let event: NormalizedEvent = serde_json::from_str(
+            include_str!("../tests/fixtures/tcp-pathology.ndjson")
+                .lines()
+                .nth(2)
+                .unwrap(),
+        )
+        .unwrap();
+        let mut model = TemporalModel::default();
+        model.ingest(event, 0.0);
+        let snapshot = model.snapshot();
+        let expected_y = (snapshot.activity[0].lane % 23) as i32;
+        let frame = compose(
+            &snapshot,
+            80,
+            24,
+            &options(ViewKind::Weather, DisplayMode::Ascii),
+        );
+        assert!(frame.cells.iter().enumerate().any(|(index, cell)| {
+            let y = (index / usize::from(frame.width)) as i32;
+            cell.intensity > 0.7 && (y - expected_y).abs() <= 3
+        }));
+    }
+
+    #[test]
+    fn tcp_burst_remains_bounded_and_settle_clears_the_field() {
+        let event: NormalizedEvent = serde_json::from_str(
+            include_str!("../tests/fixtures/tcp-pathology.ndjson")
+                .lines()
+                .nth(7)
+                .unwrap(),
+        )
+        .unwrap();
+        let mut model = TemporalModel::new(0.5);
+        for _ in 0..5_000 {
+            model.ingest(event.clone(), 0.0);
+        }
+        assert_eq!(model.snapshot().activity.len(), 4_096);
+        model.advance(2.0);
+        assert!(model.snapshot().activity.is_empty());
     }
 }

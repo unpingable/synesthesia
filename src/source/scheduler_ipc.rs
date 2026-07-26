@@ -141,6 +141,14 @@ impl NormalizedSchedulerPulse {
             ("target_cpu".to_owned(), self.target_cpu.to_string()),
             ("scheduler_kind".to_owned(), category.to_owned()),
         ]);
+        labels.insert(
+            "synesthesia.event_count".to_owned(),
+            if self.kind == PulseKind::MigrateArrive {
+                "0".to_owned()
+            } else {
+                self.event_count.to_string()
+            },
+        );
         if let Some(phase) = phase {
             labels.insert("migration_phase".to_owned(), phase.to_owned());
         }

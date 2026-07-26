@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::{
     event::{Direction, NormalizedEvent},
@@ -24,6 +24,15 @@ pub struct Metrics {
     pub events_per_second: f64,
     pub magnitude_per_second: f64,
     pub active_flows: usize,
+    pub scheduler: Option<SchedulerMetrics>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SchedulerMetrics {
+    pub switches_per_second: f64,
+    pub wakeups_per_second: f64,
+    pub migrations_per_second: f64,
+    pub active_cpus: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -38,6 +47,8 @@ pub struct ModelSnapshot {
 struct RateSample {
     time: f64,
     magnitude: f64,
+    count: f64,
+    category: u64,
 }
 
 pub struct TemporalModel {
@@ -62,6 +73,13 @@ impl TemporalModel {
     pub fn ingest(&mut self, event: NormalizedEvent, now: f64) {
         self.advance(now);
         let flow = stable_hash(event.flow_key().as_bytes());
+        let category = stable_hash(event.category.as_bytes());
+        let event_count = event
+            .labels
+            .get("synesthesia.event_count")
+            .and_then(|count| count.parse::<f64>().ok())
+            .filter(|count| count.is_finite() && *count >= 0.0)
+            .unwrap_or(1.0);
         let lane_material = event
             .labels
             .get("synesthesia.lane")
@@ -77,7 +95,7 @@ impl TemporalModel {
             born: self.now,
             lane,
             flow,
-            category: stable_hash(event.category.as_bytes()),
+            category,
             magnitude: event.magnitude,
             direction: event.direction,
         });
@@ -87,6 +105,8 @@ impl TemporalModel {
         self.rates.push_back(RateSample {
             time: self.now,
             magnitude: event.magnitude,
+            count: event_count,
+            category,
         });
         if self.flows.len() < MAX_FLOWS || self.flows.contains_key(&flow) {
             self.flows.insert(flow, self.now);
@@ -131,12 +151,14 @@ impl TemporalModel {
         let elapsed = self.rates.front().map_or(RATE_WINDOW_SECONDS, |sample| {
             (self.now - sample.time).clamp(0.1, RATE_WINDOW_SECONDS)
         });
+        let scheduler = self.scheduler_metrics(elapsed);
         ModelSnapshot {
             now: self.now,
             decay_seconds: self.decay_seconds,
             activity: self.activity.iter().cloned().collect(),
             metrics: Metrics {
-                events_per_second: self.rates.len() as f64 / elapsed,
+                events_per_second: self.rates.iter().map(|sample| sample.count).sum::<f64>()
+                    / elapsed,
                 magnitude_per_second: self
                     .rates
                     .iter()
@@ -144,8 +166,43 @@ impl TemporalModel {
                     .sum::<f64>()
                     / elapsed,
                 active_flows: self.flows.len(),
+                scheduler,
             },
         }
+    }
+
+    fn scheduler_metrics(&self, elapsed: f64) -> Option<SchedulerMetrics> {
+        let switch = stable_hash(b"sched.switch");
+        let wakeup = stable_hash(b"sched.wakeup");
+        let migrate = stable_hash(b"sched.migrate");
+        if !self
+            .rates
+            .iter()
+            .any(|sample| [switch, wakeup, migrate].contains(&sample.category))
+        {
+            return None;
+        }
+        let rate = |category| {
+            self.rates
+                .iter()
+                .filter(|sample| sample.category == category)
+                .map(|sample| sample.count)
+                .sum::<f64>()
+                / elapsed
+        };
+        let active_cpus = self
+            .activity
+            .iter()
+            .filter(|activity| [switch, wakeup, migrate].contains(&activity.category))
+            .map(|activity| activity.lane)
+            .collect::<HashSet<_>>()
+            .len();
+        Some(SchedulerMetrics {
+            switches_per_second: rate(switch),
+            wakeups_per_second: rate(wakeup),
+            migrations_per_second: rate(migrate),
+            active_cpus,
+        })
     }
 }
 
@@ -157,7 +214,7 @@ impl Default for TemporalModel {
 
 #[cfg(test)]
 mod tests {
-    use crate::source::demo::DemoSource;
+    use crate::{event::NormalizedEvent, source::demo::DemoSource};
 
     use super::*;
 
@@ -200,5 +257,44 @@ mod tests {
         let metrics = model.snapshot().metrics;
         assert_eq!(metrics.events_per_second, 4.0);
         assert_eq!(metrics.magnitude_per_second, 2_020.0);
+    }
+
+    #[test]
+    fn aggregated_scheduler_counts_drive_rates_without_particle_sprawl() {
+        let mut event: NormalizedEvent = serde_json::from_str(
+            include_str!("../examples/scheduler.ndjson")
+                .lines()
+                .nth(12)
+                .unwrap(),
+        )
+        .unwrap();
+        event
+            .labels
+            .insert("synesthesia.event_count".to_owned(), "64".to_owned());
+        let mut model = TemporalModel::default();
+        model.ingest(event, 1.0);
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.activity.len(), 1);
+        assert_eq!(snapshot.metrics.events_per_second, 640.0);
+        assert_eq!(
+            snapshot.metrics.scheduler.unwrap().switches_per_second,
+            640.0
+        );
+    }
+
+    #[test]
+    fn stale_scheduler_activity_loses_active_cpu_state() {
+        let event: NormalizedEvent = serde_json::from_str(
+            include_str!("../examples/scheduler.ndjson")
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut model = TemporalModel::new(0.5);
+        model.ingest(event, 0.0);
+        assert_eq!(model.snapshot().metrics.scheduler.unwrap().active_cpus, 1);
+        model.advance(2.0);
+        assert!(model.snapshot().metrics.scheduler.is_none());
     }
 }

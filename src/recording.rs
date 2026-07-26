@@ -131,4 +131,25 @@ mod tests {
         );
         assert_eq!(replay_delay(None, None, 2.0), Duration::from_millis(25));
     }
+
+    #[test]
+    fn sanitized_scheduler_fixture_replays_switches_wakeups_and_migrations() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/scheduler.ndjson");
+        let mut replay = ReplaySource::open(&path, 2.0).unwrap();
+        let mut categories = std::collections::BTreeSet::new();
+        let mut total_delay = Duration::ZERO;
+        while let Some((delay, event)) = replay.next_timed().unwrap() {
+            total_delay += delay;
+            categories.insert(event.category);
+        }
+        assert_eq!(
+            categories,
+            std::collections::BTreeSet::from([
+                "sched.migrate".to_owned(),
+                "sched.switch".to_owned(),
+                "sched.wakeup".to_owned(),
+            ])
+        );
+        assert_eq!(total_delay, Duration::from_micros(2_041_500));
+    }
 }

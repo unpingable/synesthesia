@@ -60,22 +60,20 @@ impl RenderFrame {
             return;
         }
         let y = self.height - 1;
+        let row_start = usize::from(y) * usize::from(self.width);
+        self.cells[row_start..row_start + usize::from(self.width)].fill(Cell::default());
         for (x, character) in status
             .chars()
             .filter(|character| character.is_ascii() && !character.is_ascii_control())
             .take(usize::from(self.width))
             .enumerate()
         {
-            self.put(
-                x as i32,
-                i32::from(y),
-                Cell {
-                    glyph: character,
-                    intensity: 0.45,
-                    category: 0,
-                    direction: Direction::Neutral,
-                },
-            );
+            self.cells[row_start + x] = Cell {
+                glyph: character,
+                intensity: 0.45,
+                category: 0,
+                direction: Direction::Neutral,
+            };
         }
     }
 
@@ -186,5 +184,28 @@ fn color_for(
             _ => Color::Rgb(35 + level / 4, 90 + level / 2, 110 + level / 2),
         },
         Theme::Monochrome => Color::Rgb(level, level, level),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_row_overwrites_field_echoes() {
+        let mut frame = RenderFrame::new(20, 3);
+        frame.put(
+            5,
+            2,
+            Cell {
+                glyph: '@',
+                intensity: 1.0,
+                category: 9,
+                direction: Direction::Outbound,
+            },
+        );
+        frame.write_status(" status");
+        let text = frame.plain_text();
+        assert_eq!(text.lines().nth(2), Some(" status"));
     }
 }

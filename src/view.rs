@@ -16,6 +16,8 @@ pub struct ViewOptions {
     pub paused: bool,
     pub malformed: u64,
     pub dropped: u64,
+    pub kernel_dropped: u64,
+    pub collector_dropped: u64,
     pub help: bool,
 }
 
@@ -36,6 +38,8 @@ pub fn compose(
     let status = if options.help {
         " q/esc quit  space pause  1 weather  2 waterfall  a ascii/ansi  c theme  +/- gain  [] decay "
             .to_owned()
+    } else if let Some(scheduler) = &snapshot.metrics.scheduler {
+        scheduler_status(snapshot, scheduler, width, options)
     } else {
         format!(
             " {:>5.1} evt/s  {:>7}/s  {:>3} flows  bad {} drop {}  {:?}/{:?}{}",
@@ -52,6 +56,61 @@ pub fn compose(
     };
     frame.write_status(&status);
     frame
+}
+
+fn scheduler_status(
+    snapshot: &ModelSnapshot,
+    scheduler: &crate::model::SchedulerMetrics,
+    width: u16,
+    options: &ViewOptions,
+) -> String {
+    let state = if options.paused { " pause" } else { "" };
+    if width < 100 {
+        format!(
+            " {} sched/s sw {} wk {} mg {} cpu {} loss {}/{}/{} {}/{}{}",
+            compact_magnitude(snapshot.metrics.events_per_second),
+            compact_magnitude(scheduler.switches_per_second),
+            compact_magnitude(scheduler.wakeups_per_second),
+            compact_magnitude(scheduler.migrations_per_second),
+            scheduler.active_cpus,
+            options.kernel_dropped,
+            options.collector_dropped,
+            options.dropped,
+            short_view(options.view),
+            short_mode(options.mode),
+            state,
+        )
+    } else {
+        format!(
+            " {} sched/s  {} switch  {} wake  {} migrate  {} cpu  loss k/c/u {}/{}/{}  {:?}/{:?}{}",
+            compact_magnitude(snapshot.metrics.events_per_second),
+            compact_magnitude(scheduler.switches_per_second),
+            compact_magnitude(scheduler.wakeups_per_second),
+            compact_magnitude(scheduler.migrations_per_second),
+            scheduler.active_cpus,
+            options.kernel_dropped,
+            options.collector_dropped,
+            options.dropped,
+            options.view,
+            options.mode,
+            state,
+        )
+        .to_lowercase()
+    }
+}
+
+fn short_view(view: ViewKind) -> &'static str {
+    match view {
+        ViewKind::Weather => "w",
+        ViewKind::Waterfall => "f",
+    }
+}
+
+fn short_mode(mode: DisplayMode) -> &'static str {
+    match mode {
+        DisplayMode::Ansi => "ansi",
+        DisplayMode::Ascii => "ascii",
+    }
 }
 
 fn weather(
@@ -206,7 +265,9 @@ fn visual_cell(intensity: f32, category: u64, direction: Direction, mode: Displa
 }
 
 fn compact_magnitude(value: f64) -> String {
-    if value >= 1_000_000.0 {
+    if value.abs() < 0.5 {
+        "0".to_owned()
+    } else if value >= 1_000_000.0 {
         format!("{:.1}m", value / 1_000_000.0)
     } else if value >= 1_000.0 {
         format!("{:.1}k", value / 1_000.0)
@@ -217,7 +278,9 @@ fn compact_magnitude(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::{cli::ViewKind, model::TemporalModel, source::demo::DemoSource};
+    use crate::{
+        cli::ViewKind, event::NormalizedEvent, model::TemporalModel, source::demo::DemoSource,
+    };
 
     use super::*;
 
@@ -237,6 +300,8 @@ mod tests {
             paused: false,
             malformed: 0,
             dropped: 0,
+            kernel_dropped: 0,
+            collector_dropped: 0,
             help: false,
         }
     }
@@ -323,5 +388,57 @@ mod tests {
             &options(ViewKind::Weather, DisplayMode::Ascii),
         );
         assert_ne!(low_frame.plain_text(), high_frame.plain_text());
+    }
+
+    fn scheduler_snapshot() -> ModelSnapshot {
+        let mut model = TemporalModel::default();
+        for line in include_str!("../examples/scheduler.ndjson").lines() {
+            let event: NormalizedEvent = serde_json::from_str(line).unwrap();
+            let now = event.timestamp.unwrap();
+            model.ingest(event, now);
+        }
+        model.snapshot()
+    }
+
+    #[test]
+    fn scheduler_fixture_snapshot_is_deterministic_and_has_clean_status() {
+        let render = || {
+            compose(
+                &scheduler_snapshot(),
+                80,
+                24,
+                &options(ViewKind::Weather, DisplayMode::Ascii),
+            )
+            .plain_text()
+        };
+        let first = render();
+        assert_eq!(first, render());
+        let status = first.lines().last().unwrap();
+        assert!(status.contains("sched/s"));
+        assert!(status.contains("loss 0/0/0"));
+        assert!(!status.contains('@'));
+    }
+
+    #[test]
+    fn scheduler_fixture_is_visibly_distinct_from_generic_lines() {
+        let scheduler = compose(
+            &scheduler_snapshot(),
+            80,
+            24,
+            &options(ViewKind::Weather, DisplayMode::Ascii),
+        );
+        let generic = compose(
+            &snapshot(),
+            80,
+            24,
+            &options(ViewKind::Weather, DisplayMode::Ascii),
+        );
+        let differing = scheduler
+            .cells
+            .iter()
+            .zip(&generic.cells)
+            .filter(|(left, right)| left.glyph != right.glyph)
+            .count();
+        assert!(differing > 150);
     }
 }

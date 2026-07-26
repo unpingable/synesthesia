@@ -1,4 +1,15 @@
+# Rust
 /target
+
+# Editors and operating systems
 *.swp
 *.tmp
+.DS_Store
+Thumbs.db
 
+# Local configuration and agent state
+.env
+.mcp.json
+.continuity/
+.governor/
+.claude/projects/

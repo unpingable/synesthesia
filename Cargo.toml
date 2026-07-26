@@ -3,9 +3,14 @@ name = "synesthesia"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Data in. Terminal weather out."
+authors = ["James Beck"]
+description = "Terminal-native visual weather for live machine activity."
 license = "Apache-2.0"
-repository = ""
+repository = "https://github.com/unpingable/synesthesia"
+readme = "README.md"
+keywords = ["terminal", "visualization", "tui", "networking", "ascii-art"]
+categories = ["command-line-utilities", "visualization"]
+publish = false
 
 [[bin]]
 name = "synesthesia"

@@ -23,6 +23,15 @@ No setup is the point. Any line can become an event:
 nc -lk 9000 | cargo run --release -- stdin --format lines
 ```
 
+Synesthesia currently runs from source; it is not published to crates.io and
+has no packaged release:
+
+```sh
+git clone https://github.com/unpingable/synesthesia.git
+cd synesthesia
+cargo run --release -- demo
+```
+
 The network hook uses one exact field order:
 
 ```sh
@@ -98,3 +107,10 @@ snapshots contain printable ASCII and newlines only.
 See [the design notes](docs/design.md) for boundaries and bounded-memory
 behavior. See [the recording recipe](examples/demo.tape) to make a real GIF
 with [VHS](https://github.com/charmbracelet/vhs).
+
+## License and provenance
+
+Licensed under [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for project
+attribution and [PROVENANCE.md](PROVENANCE.md) for the human-directed,
+AI-assisted development record. Security reporting guidance is in
+[SECURITY.md](SECURITY.md).

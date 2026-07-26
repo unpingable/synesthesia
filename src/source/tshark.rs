@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use crate::{
     event::{Direction, NormalizedEvent, SCHEMA_VERSION},
-    source::{EventSource, SourceStats},
+    source::{EventSource, SourceStats, read_bounded_record},
 };
 
 pub const COLUMN_COUNT: usize = 11;
@@ -75,9 +75,14 @@ impl<R: BufRead> TsharkTsvSource<R> {
 impl<R: BufRead> EventSource for TsharkTsvSource<R> {
     fn next_event(&mut self) -> Result<Option<NormalizedEvent>> {
         loop {
-            self.buffer.clear();
-            if self.reader.read_until(b'\n', &mut self.buffer)? == 0 {
+            let (count, oversized) = read_bounded_record(&mut self.reader, &mut self.buffer)?;
+            if count == 0 {
                 return Ok(None);
+            }
+            if oversized {
+                self.stats.malformed += 1;
+                eprintln!("synesthesia: skipped tshark TSV row larger than 64 KiB");
+                continue;
             }
             match Self::parse_row(&self.buffer) {
                 Ok(event) => {

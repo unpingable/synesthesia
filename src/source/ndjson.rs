@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::{
     event::NormalizedEvent,
-    source::{EventSource, SourceStats},
+    source::{EventSource, SourceStats, read_bounded_record},
 };
 
 pub struct NdjsonSource<R> {
@@ -26,9 +26,14 @@ impl<R: BufRead> NdjsonSource<R> {
 impl<R: BufRead> EventSource for NdjsonSource<R> {
     fn next_event(&mut self) -> Result<Option<NormalizedEvent>> {
         loop {
-            self.buffer.clear();
-            if self.reader.read_until(b'\n', &mut self.buffer)? == 0 {
+            let (count, oversized) = read_bounded_record(&mut self.reader, &mut self.buffer)?;
+            if count == 0 {
                 return Ok(None);
+            }
+            if oversized {
+                self.stats.malformed += 1;
+                eprintln!("synesthesia: skipped NDJSON record larger than 64 KiB");
+                continue;
             }
             if self.buffer.iter().all(u8::is_ascii_whitespace) {
                 continue;
@@ -73,5 +78,18 @@ mod tests {
         assert_eq!(source.stats().accepted, 1);
         assert_eq!(source.stats().malformed, 2);
         assert!(source.next_event().unwrap().is_none());
+    }
+
+    #[test]
+    fn oversized_record_is_discarded_without_losing_the_next_record() {
+        let huge = format!(
+            "{{\"v\":1,\"category\":\"{}\",\"magnitude\":1}}\n\
+             {{\"v\":1,\"category\":\"survivor\",\"magnitude\":2}}\n",
+            "x".repeat(70_000)
+        );
+        let mut source = NdjsonSource::new(Cursor::new(huge));
+        let event = source.next_event().unwrap().unwrap();
+        assert_eq!(event.category, "survivor");
+        assert_eq!(source.stats().malformed, 1);
     }
 }

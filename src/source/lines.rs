@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use crate::{
     event::{Direction, NormalizedEvent, SCHEMA_VERSION},
-    source::{EventSource, SourceStats, stable_hash},
+    source::{EventSource, SourceStats, read_bounded_record, stable_hash},
 };
 
 pub struct LineSource<R> {
@@ -29,8 +29,7 @@ impl<R: BufRead> LineSource<R> {
 
 impl<R: BufRead> EventSource for LineSource<R> {
     fn next_event(&mut self) -> Result<Option<NormalizedEvent>> {
-        self.buffer.clear();
-        let count = self.reader.read_until(b'\n', &mut self.buffer)?;
+        let (count, _) = read_bounded_record(&mut self.reader, &mut self.buffer)?;
         if count == 0 {
             return Ok(None);
         }

@@ -64,10 +64,10 @@ pub struct VisualArgs {
     #[arg(long)]
     pub snapshot: bool,
     /// Snapshot width (ignored interactively).
-    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..))]
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=500))]
     pub width: u16,
     /// Snapshot height (ignored interactively).
-    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u16).range(1..))]
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u16).range(1..=200))]
     pub height: u16,
 }
 

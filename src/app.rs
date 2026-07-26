@@ -35,10 +35,10 @@ enum Producer {
     },
     Stdin {
         format: InputFormat,
-        record: Option<std::path::PathBuf>,
+        recorder: Option<Recorder>,
     },
     Replay {
-        args: ReplayArgs,
+        replay: ReplaySource,
     },
 }
 
@@ -59,10 +59,11 @@ pub fn run_stdin(args: StdinArgs) -> Result<()> {
         return snapshot_stdin(args);
     }
     let visual = args.visual.clone();
+    let recorder = args.record.as_deref().map(Recorder::create).transpose()?;
     run_interactive(
         Producer::Stdin {
             format: args.format,
-            record: args.record,
+            recorder,
         },
         visual,
     )
@@ -73,7 +74,8 @@ pub fn run_replay(args: ReplayArgs) -> Result<()> {
         return snapshot_replay(args);
     }
     let visual = args.visual.clone();
-    run_interactive(Producer::Replay { args }, visual)
+    let replay = ReplaySource::open(&args.path, args.speed)?;
+    run_interactive(Producer::Replay { replay }, visual)
 }
 
 fn snapshot_demo(args: &DemoArgs) -> Result<()> {
@@ -170,6 +172,8 @@ fn run_interactive(producer: Producer, visual: VisualArgs) -> Result<()> {
             model.advance(now);
         }
         let size = session.terminal_mut().size()?;
+        let width = size.width.min(500);
+        let height = size.height.min(200);
         let options = ViewOptions {
             mode: state.mode,
             view: state.view,
@@ -179,7 +183,7 @@ fn run_interactive(producer: Producer, visual: VisualArgs) -> Result<()> {
             dropped: buffer.dropped(),
             help: state.help,
         };
-        let frame = compose(&model.snapshot(), size.width, size.height, &options);
+        let frame = compose(&model.snapshot(), width, height, &options);
         session.terminal_mut().draw(|terminal_frame| {
             terminal_frame.render_widget(
                 GridWidget {
@@ -269,7 +273,10 @@ fn spawn_producer(producer: Producer, ingress: Ingress, stats: Arc<ProducerStats
                 thread::sleep(Duration::from_millis(24));
             }
         }
-        Producer::Stdin { format, record } => {
+        Producer::Stdin {
+            format,
+            mut recorder,
+        } => {
             let stdin = io::stdin();
             let mut source: Box<dyn EventSource> = match format {
                 InputFormat::Lines => Box::new(LineSource::new(BufReader::new(stdin.lock()))),
@@ -278,12 +285,6 @@ fn spawn_producer(producer: Producer, ingress: Ingress, stats: Arc<ProducerStats
                     Box::new(TsharkTsvSource::new(BufReader::new(stdin.lock())))
                 }
             };
-            let mut recorder = record
-                .as_deref()
-                .map(Recorder::create)
-                .transpose()
-                .ok()
-                .flatten();
             loop {
                 match source.next_event() {
                     Ok(Some(incoming)) => {
@@ -305,10 +306,7 @@ fn spawn_producer(producer: Producer, ingress: Ingress, stats: Arc<ProducerStats
                 let _ = recorder.finish();
             }
         }
-        Producer::Replay { args } => {
-            let Ok(mut replay) = ReplaySource::open(&args.path, args.speed) else {
-                return;
-            };
+        Producer::Replay { mut replay } => {
             while let Ok(Some((delay, incoming))) = replay.next_timed() {
                 thread::sleep(delay);
                 ingress.submit(incoming);

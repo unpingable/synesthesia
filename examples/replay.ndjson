@@ -1,0 +1,6 @@
+{"v":1,"timestamp":0.0,"category":"dns","origin":"node-a:53000","target":"resolver:53","magnitude":82,"direction":"outbound"}
+{"v":1,"timestamp":0.08,"category":"dns","origin":"resolver:53","target":"node-a:53000","magnitude":164,"direction":"inbound"}
+{"v":1,"timestamp":0.22,"category":"tls","origin":"node-a:51000","target":"edge:443","magnitude":1514,"direction":"outbound"}
+{"v":1,"timestamp":0.25,"category":"tls","origin":"edge:443","target":"node-a:51000","magnitude":9000,"direction":"inbound"}
+{"v":1,"timestamp":0.55,"category":"pulse","origin":"node-b","target":"node-c","magnitude":320,"direction":"neutral"}
+{"v":1,"timestamp":0.8,"category":"ghost","origin":"node-c","target":"node-a","magnitude":2048,"direction":"unknown"}

@@ -14,7 +14,7 @@ pub struct Activity {
     pub born: f64,
     pub lane: u64,
     pub flow: u64,
-    pub category: String,
+    pub category: u64,
     pub magnitude: f64,
     pub direction: Direction,
 }
@@ -75,7 +75,7 @@ impl TemporalModel {
             born: self.now,
             lane,
             flow,
-            category: event.category,
+            category: stable_hash(event.category.as_bytes()),
             magnitude: event.magnitude,
             direction: event.direction,
         });

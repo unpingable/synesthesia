@@ -32,7 +32,15 @@ impl TerminalSession {
             restore();
             eprintln!("synesthesia panicked: {info}");
         }));
-        let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+        let terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                restore();
+                let _ = panic::take_hook();
+                panic::set_hook(previous_hook);
+                return Err(error.into());
+            }
+        };
         Ok(Self {
             terminal,
             previous_hook: Some(previous_hook),

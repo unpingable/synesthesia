@@ -3,7 +3,6 @@ use crate::{
     event::Direction,
     model::ModelSnapshot,
     render::{Cell, RenderFrame},
-    source::stable_hash,
 };
 
 const ASCII_DENSITY: &[u8] = b" .:-=+*#%@";
@@ -109,7 +108,7 @@ fn weather(
             Direction::Neutral | Direction::Unknown => 0.35,
         };
         let trail = (3.0 + weight * 7.0) as i32;
-        let category = stable_hash(activity.category.as_bytes());
+        let category = activity.category;
         for step in 0..trail {
             let fade = 1.0 - step as f32 / trail as f32;
             let trail_x = x - f64::from(step) * velocity;
@@ -147,7 +146,7 @@ fn waterfall(
         if age > history {
             continue;
         }
-        let category = stable_hash(activity.category.as_bytes());
+        let category = activity.category;
         let flow_band = (activity.flow % u64::from(field_height)) as u16;
         let category_band = (category % u64::from(field_height)) as u16;
         let y = (category_band * 2 + flow_band) / 3;

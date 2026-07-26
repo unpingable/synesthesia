@@ -504,11 +504,18 @@ impl FlightRecorder {
         let actual_post_duration = (now - triggered.trigger_at)
             .max(0.0)
             .min(self.config.post_trigger.as_secs_f64());
+        let completion_timestamp = match (
+            triggered
+                .trigger_timestamp
+                .map(|timestamp| timestamp + actual_post_duration),
+            triggered.last_event_timestamp,
+        ) {
+            (Some(deadline), Some(last)) => Some(deadline.max(last)),
+            (deadline, last) => deadline.or(last),
+        };
         let result = triggered.writer.finish(
             &self.config,
-            triggered
-                .last_event_timestamp
-                .or(triggered.trigger_timestamp),
+            completion_timestamp,
             &triggered.trigger,
             triggered.pre_events,
             triggered.post_events,
@@ -1082,6 +1089,7 @@ mod tests {
         assert_eq!(records[3].category, TRIGGER_CATEGORY);
         assert_eq!(records[4].labels[PHASE_LABEL], "post");
         assert_eq!(records[5].labels["record"], "end");
+        assert_eq!(records[5].timestamp, Some(1.5));
         cleanup(&path);
     }
 

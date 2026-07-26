@@ -224,9 +224,7 @@ fn run_worker(
             }
             Ok(Command::Cancel) => match recorder.state() {
                 FlightState::Armed => recorder.cancel().map(|()| false),
-                FlightState::CapturingTail => {
-                    recorder.interrupt(now, losses_with_writer(losses, &shared))
-                }
+                FlightState::CapturingTail => Ok(false),
                 state => Err(FlightError::IllegalTransition {
                     state,
                     operation: "cancel",

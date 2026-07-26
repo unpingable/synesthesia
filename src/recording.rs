@@ -65,8 +65,21 @@ impl ReplaySource {
         };
         if event.category == METADATA_CATEGORY {
             let metadata = parse_metadata_event(&event)?;
+            let is_end = metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.record == "end");
             self.flight_source = metadata.map(|metadata| metadata.source);
-            return Ok(Some((Duration::ZERO, event)));
+            let delay = if is_end {
+                replay_delay(self.previous_timestamp, event.timestamp, self.speed)
+            } else {
+                Duration::ZERO
+            };
+            if is_end {
+                if let Some(timestamp) = event.timestamp {
+                    self.previous_timestamp = Some(timestamp);
+                }
+            }
+            return Ok(Some((delay, event)));
         }
         if event.category == crate::flight_recorder::TRIGGER_CATEGORY {
             if let Some(source) = self.flight_source {
@@ -227,6 +240,25 @@ mod tests {
                 2
             );
         }
+    }
+
+    #[test]
+    fn flight_replay_advances_through_a_quiet_tail_before_end_metadata() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tcp-flight-incident.ndjson");
+        let mut replay = ReplaySource::open(&path, 1.0).unwrap();
+        let mut end_delay = None;
+        while let Some((delay, event)) = replay.next_timed().unwrap() {
+            if event.category == METADATA_CATEGORY
+                && event
+                    .labels
+                    .get("record")
+                    .is_some_and(|value| value == "end")
+            {
+                end_delay = Some(delay);
+            }
+        }
+        assert_eq!(end_delay, Some(Duration::from_millis(800)));
     }
 
     #[test]

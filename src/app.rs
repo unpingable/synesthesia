@@ -442,13 +442,21 @@ fn run_interactive(
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         if key.code == KeyCode::Char('t') {
                             if let Some(flight) = &flight {
-                                flight.manual_trigger()?;
+                                if flight.status().state
+                                    == crate::flight_recorder::FlightState::Armed
+                                {
+                                    flight.manual_trigger()?;
+                                }
                             }
                             continue;
                         }
                         if key.code == KeyCode::Char('x') {
                             if let Some(flight) = &flight {
-                                flight.cancel()?;
+                                if flight.status().state
+                                    == crate::flight_recorder::FlightState::Armed
+                                {
+                                    flight.cancel()?;
+                                }
                             }
                             continue;
                         }

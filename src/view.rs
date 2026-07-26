@@ -54,7 +54,7 @@ pub fn compose(
     } else {
         format!(
             " {:>5.1} evt/s  {:>7}/s  {:>3} flows  bad {} drop {}  {:?}/{:?}{}",
-            snapshot.metrics.events_per_second,
+            clean_zero(snapshot.metrics.events_per_second),
             compact_magnitude(snapshot.metrics.magnitude_per_second),
             snapshot.metrics.active_flows,
             options.malformed,
@@ -83,6 +83,10 @@ pub fn compose(
     }
     frame.write_status(&status);
     frame
+}
+
+fn clean_zero(value: f64) -> f64 {
+    if value.abs() < 0.05 { 0.0 } else { value }
 }
 
 fn flight_status(status: &FlightStatus) -> String {
@@ -924,6 +928,7 @@ mod tests {
         assert!(status.starts_with(" rec armed pre 8.4s evict 12 |"));
         assert!(status.contains("tcp/s"));
         assert!(!status.contains('@'));
+        assert!(!status.contains("-0.0"));
     }
 
     #[test]

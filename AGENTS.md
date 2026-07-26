@@ -84,6 +84,11 @@ docs/demo.gif        Real generated terminal recording
 9. Flight recording begins only after semantic normalization. Keep its
    prehistory, trigger windows, writer channel, and post-trigger tail bounded;
    never move historical retention into a privileged collector.
+10. Particles are bounded semantic-event consequences, never source-independent
+    decoration. Disabling them must leave the underlying field unchanged.
+11. Process mode reads only the documented narrow `/proc` files. Do not add
+    arguments, environments, paths, usernames, process memory, or an unbounded
+    task table.
 
 ## What this is not
 

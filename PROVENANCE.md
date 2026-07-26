@@ -107,6 +107,7 @@ recorder for the existing scheduler and TCP semantic sources:
 - `b5e36ec` — add scheduler and tcp flight triggers
 - `f81518d` — integrate live incident recording
 - `ec4abd7` — qualify synesthesia flight recorder
+- `e82237f` — harden experimental flight recorder
 
 The recorder was implemented as original Rust code under human direction. It
 retains only normalized semantic events in the unprivileged renderer process;
@@ -122,6 +123,31 @@ event-rate incident both completed with zero reported kernel, collector, IPC,
 renderer, malformed-record, writer, or prehistory-eviction loss. Exact counts
 and workload caveats are preserved in
 `docs/flight-recorder-qualification.md`.
+
+### Particles, procfs, and binary distribution campaign
+
+Lead collaboration: OpenAI Codex.
+
+A later human-directed campaign added bounded source-neutral particles, one
+unprivileged Linux procfs source, and the repository's first binary
+distribution path:
+
+- `3eed151` — add bounded particle weather overlay
+- `6134b50` — add proc activity source boundary
+- `84ae73c` — add nonroot proc activity weather
+
+The particle model and procfs parser/tracker are original Rust implementations.
+No htop, procps, btop, tracing-tool, or visualizer implementation was copied.
+The procfs field selection follows the Linux procfs text interfaces and reads
+no process arguments, environments, paths, file descriptors, usernames, or
+memory.
+
+The checked-in process fixture is synthetic and sanitized, using generic
+process names. Real workload recordings remained under `/tmp`. The release
+archive is assembled from locally built project binaries and the repository's
+own license, notice, README, and release notes. Packaging uses standard Cargo,
+GNU tar, gzip, and SHA-256 tools and adds no third-party runtime service or
+installer.
 
 ## Provenance basis and limits
 

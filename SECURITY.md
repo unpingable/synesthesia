@@ -1,8 +1,9 @@
 # Security
 
 Synesthesia is experimental terminal visualization software. It consumes
-potentially untrusted line, NDJSON, and tshark TSV input and renders activity
-inside a terminal. It is not a security boundary or packet-inspection tool.
+potentially untrusted line, NDJSON, and tshark TSV input, and reads mutable
+Linux procfs records, before rendering activity inside a terminal. It is not a
+security boundary, packet-inspection tool, or process profiler.
 
 ## Reporting
 
@@ -57,6 +58,20 @@ recorder refuses existing final and partial paths. A failed capture may retain
 an explicitly suffixed `.part` file; inspect or remove it deliberately rather
 than assuming failure wrote nothing.
 
+Linux process mode is unprivileged and reads only `/proc/stat`,
+`/proc/meminfo`, `/proc/<pid>/stat`, and readable `/proc/<pid>/io`. It does not
+read process arguments, environments, working directories, executable paths,
+open files, usernames, cgroup paths, or memory. Ordinary process recordings
+may contain bounded `comm` names and PIDs. `proc --anonymize` replaces both
+with stable opaque identities for that session, but it is not a general
+redaction guarantee for labels supplied by other sources.
+
+Release archives contain executable eBPF collector helpers next to the
+launcher so sibling lookup is explicit. They have ordinary `0755` mode only:
+no setuid bit and no file capability. Synesthesia does not install or
+privilege them. `demo`, `stdin`, `replay`, and `proc` are unprivileged;
+scheduler and TCP collection remain explicit privileged operations.
+
 `examples/tcp-pathology-lab.sh` is an explicit root-operated qualification
 tool, not code invoked by Synesthesia. It creates two temporary network
 namespaces and a private veth/qdisc, refuses non-root execution, never changes
@@ -65,6 +80,6 @@ Review shell scripts before executing them with privilege.
 
 ## Supported versions
 
-The project is currently at an experimental `0.1.x` stage. Security fixes are
+The project is currently at an experimental `0.2.x` stage. Security fixes are
 made on the current `main` branch; older commits are not maintained as separate
 supported release lines.

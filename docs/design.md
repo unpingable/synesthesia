@@ -18,7 +18,8 @@ source reader -> NormalizedEvent -> bounded channel -> TemporalModel
 - `ingestion` is a 2,048-event non-blocking channel. Full channels drop new
   decorative events and increment an atomic counter.
 - `model` advances by elapsed time, not one simulation tick per event. It keeps
-  at most 4,096 activity and rate samples and 512 active flows.
+  at most 4,096 activity and rate samples, 512 active flows, and 2,048
+  short-lived particles.
 - `view` turns an immutable snapshot into cells. Stable endpoint/flow hashes
   create structure without an identity database.
 - `render` owns the backend-neutral cell grid and Ratatui widget.
@@ -45,6 +46,53 @@ Event age maps to the horizontal time axis. A blend of category and flow hashes
 selects rows. Magnitude controls density and heavy-event thickness. It is a
 projection of retained history, with no random decoration.
 
+## Event-driven particles
+
+Particles are a second immutable-snapshot projection, not a change to field
+physics. The model classifies a small visual hint from a normalized category,
+then derives origin, velocity, energy, and lifetime from stable event hashes,
+direction, magnitude, and model time. Generic heavy events make embers;
+retransmits fracture, resets impact, and migrations travel between stable
+regions. The classifier remains narrow and sources do not draw cells.
+
+At most 16 particles spawn from one semantic event. At most 2,048 are active,
+with deterministic oldest-first eviction, and every lifetime is between 250
+ms and two seconds. Updating and rendering therefore remain bounded under a
+flood. `--particles off` skips only this projection and leaves activities,
+rates, flows, gain, decay, and the base render unchanged. Low-magnitude events
+spawn none; particles are never fabricated during a quiet source period.
+
+## Linux proc activity source
+
+The unprivileged process source is a monotonic sampler downstream of a narrow
+procfs reader:
+
+```text
+/proc/stat + /proc/meminfo + /proc/<pid>/{stat,io}
+  -> bounded ProcSample -> bounded ProcTracker
+  -> NormalizedEvent -> ordinary renderer channel
+```
+
+The first sample seeds a quiet baseline. Later samples compare PID plus kernel
+start time, so PID reuse produces one exit and one new birth without a counter
+spike. CPU tick deltas become neutral `proc.cpu` events. Read/write byte deltas
+become directional `proc.io.read` and `proc.io.write`; counter regression is
+treated as reset, not wraparound magnitude. Process birth/exit, changes in
+`procs_running`, and coarse low-`MemAvailable` bands are observations rather
+than diagnoses.
+
+A scan holds at most 8,192 process records, tracks at most 4,096 identities,
+and emits at most 8,192 semantic events. When tracking is full, already-known
+processes remain preferred and new identities are refused into one bounded
+background observation. Disappearing and permission-denied procfs entries are
+counted separately and do not abort a sample.
+
+The reader never opens `cmdline`, `environ`, `cwd`, `exe`, `fd`, cgroup,
+credential, or memory interfaces. Normalized recordings include bounded
+`comm`, PID, and start-time identity by default. Session-local anonymization
+hashes PID/start-time and omits name/PID labels. It is deliberately not a
+process table or persistent identity database.
+
 ## Time
 
 Interactive sources are timestamped by model arrival time so animation is
@@ -55,9 +103,9 @@ timestamps.
 
 ## Extension seam
 
-New sources implement one internal `EventSource` trait and emit
-`NormalizedEvent`. There is intentionally no plugin ABI, daemon, database, or
-network service.
+Streaming readers implement the internal `EventSource` trait; sampled sources
+use an equally narrow bounded batch boundary. Both emit `NormalizedEvent`.
+There is intentionally no plugin ABI, daemon, database, or network service.
 
 ## Experimental scheduler source implementation choice
 
@@ -247,3 +295,21 @@ one exists.
 The controlled live results, including exact counts and interpretation limits,
 are recorded in
 [flight-recorder-qualification.md](flight-recorder-qualification.md).
+
+## Binary distribution
+
+`scripts/build-release.sh` is the one packaging path used locally and by the
+tag workflow. It builds all three release binaries with the `ebpf` feature and
+`Cargo.lock`, then stages only the launcher, scheduler/TCP helpers, README,
+release notes, license, and notice. The archive is x86_64 Linux glibc only.
+
+GNU tar receives sorted names, numeric root ownership, normalized modes, and a
+single `SOURCE_DATE_EPOCH`; gzip receives `-n`. SHA-256 is generated beside the
+archive. The script refuses a dirty worktree by default and never publishes.
+The GitHub workflow runs the same formatter, Clippy, and test gates before
+calling this script and creating a release for an already-pushed version tag.
+
+The archive installs nothing. Its helpers remain ordinary sibling executables
+with no setuid bit or file capability. Dynamic glibc linking and experimental
+kernel requirements are documented limitations rather than hidden installer
+behavior.

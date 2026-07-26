@@ -25,8 +25,12 @@ fn main() {
 }
 
 fn compile_bpf(source: &Path, output: &Path) {
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("Cargo must set CARGO_MANIFEST_DIR");
+    let debug_prefix = format!("-fdebug-prefix-map={manifest_dir}=/src/synesthesia");
     let status = Command::new("clang")
-        .args(["-target", "bpf", "-O2", "-g", "-Wall", "-Werror", "-c"])
+        .args(["-target", "bpf", "-O2", "-g", "-Wall", "-Werror"])
+        .arg(debug_prefix)
+        .arg("-c")
         .arg(source)
         .arg("-o")
         .arg(output)

@@ -23,14 +23,66 @@ No setup is the point. Any line can become an event:
 nc -lk 9000 | cargo run --release -- stdin --format lines
 ```
 
-Synesthesia currently runs from source; it is not published to crates.io and
-has no packaged release:
+## Download
+
+The v0.2.0 release is one x86_64 Linux glibc archive:
+
+```sh
+sha256sum -c synesthesia-v0.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf synesthesia-v0.2.0-x86_64-unknown-linux-gnu.tar.gz
+./synesthesia demo
+```
+
+Download the archive and its SHA-256 checksum from the
+[v0.2.0 release](https://github.com/unpingable/synesthesia/releases/tag/v0.2.0).
+The archive also contains the two experimental eBPF collector helpers beside
+the launcher. It does not install them, grant capabilities, or set setuid
+bits.
+
+To build from source instead:
 
 ```sh
 git clone https://github.com/unpingable/synesthesia.git
 cd synesthesia
 cargo run --release -- demo
 ```
+
+Synesthesia is not published to crates.io.
+
+## Linux process weather without root
+
+```sh
+./synesthesia proc
+```
+
+Or from source:
+
+```sh
+cargo run --release -- proc
+```
+
+Process mode samples Linux `/proc` every 250 ms. It turns per-process CPU
+deltas, readable storage-I/O deltas, process birth/exit, runqueue changes, and
+low-available-memory observations into ordinary normalized events. Stable
+process identities develop stable regions; CPU load sustains motion, reads and
+writes move in opposite directions, and process churn arrives as a brief
+front. No root, BTF, eBPF, tshark, daemon, or service is required.
+
+The source reads `/proc/stat`, `/proc/meminfo`, `/proc/<pid>/stat`, and readable
+`/proc/<pid>/io`. It does not read command-line arguments, environments,
+working directories, executable paths, open files, cgroup paths, usernames,
+or process memory. Recordings contain bounded process names and PIDs by
+default; use `--anonymize` for stable session-local opaque identities:
+
+```sh
+./synesthesia proc --anonymize --record proc-session.ndjson
+./synesthesia replay proc-session.ndjson
+```
+
+Sampling accepts `--interval 50ms` through `--interval 5s` and an optional
+`--pid PID`. A scan considers at most 8,192 candidates, tracks at most 4,096
+processes, and emits at most 8,192 semantic events per sample. The first sample
+is a quiet baseline rather than a fabricated process-start storm.
 
 The network hook uses one exact field order:
 
@@ -220,9 +272,10 @@ history through category and stable-flow bands. Both accept `--mode ascii` or
 `--theme`.
 
 `q`/Escape quits, Space pauses, `1`/`2` selects a view, `a` toggles rendering,
-`c` changes theme, `+`/`-` changes gain, `[`/`]` changes persistence, and
-`h`/`?` shows help. While a flight recorder is armed, `t` triggers manually
-and `x` cancels without writing.
+`c` changes theme, `p` toggles event-driven particles, `+`/`-` changes gain,
+`[`/`]` changes persistence, and `h`/`?` shows help. `--particles off`
+preserves the field without the ember layer. While a flight recorder is armed,
+`t` triggers manually and `x` cancels without writing.
 
 For plain, deterministic output:
 
@@ -244,6 +297,7 @@ snapshots contain printable ASCII and newlines only.
 - not a replacement for Wireshark
 - not a scheduler profiler or complete causality model
 - not a TCP connection tracker, packet capture, or diagnosis of retransmit cause
+- not a process table, profiler, argument collector, or persistent process history
 - not an incident manager, retention service, rules engine, or alerting system
 - not yet a stable wire protocol beyond the documented v1 behavior
 

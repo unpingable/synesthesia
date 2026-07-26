@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.0 - 2026-07-26
+
+- Add a bounded event-driven particle layer with deterministic direction,
+  source-neutral magnitude scaling, ASCII/ANSI grammar, and a `p` toggle.
+- Add unprivileged Linux process weather from bounded `/proc` sampling,
+  including CPU, readable I/O, process birth/exit, runqueue, anonymized
+  recording, and a sanitized replay fixture.
+- Add deterministic x86_64 Linux glibc release packaging, SHA-256 checksums,
+  push/PR CI, and a tag-triggered GitHub release workflow.
 - Add an experimental x86_64 Linux scheduler source backed by four stable
   scheduler tracepoints and an ephemeral Aya-loaded eBPF program.
 - Add a separate bounded collector helper that normalizes and aggregates

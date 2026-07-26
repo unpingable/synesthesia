@@ -58,3 +58,23 @@ timestamps.
 New sources implement one internal `EventSource` trait and emit
 `NormalizedEvent`. There is intentionally no plugin ABI, daemon, database, or
 network service.
+
+## Experimental scheduler source implementation choice
+
+The local scheduler-source campaign qualified an x86_64 Ubuntu 6.8 host with
+readable kernel BTF, Clang 18 with an eBPF backend, bpftool 7.4, and no kernel
+lockdown. Unprivileged BPF is disabled and the BPF/tracefs mounts are
+root-readable, so live attachment requires privileges granted externally.
+
+The narrow integrated route is Aya userspace plus one checked-in C eBPF
+program compiled by Clang. Aya does not require libbpf or a daemon, while the
+host lacks the libbpf development pkg-config package and `bpf-linker`. The C
+program will attach only stable scheduler tracepoints and emit a fixed,
+48-byte record through a bounded ring buffer. It will not collect command
+arguments, paths, environment data, stack traces, or packet contents.
+
+The userspace boundary decodes that record strictly, maps it into NDJSON v1,
+and supplies an internal stable CPU-lane hint to the existing temporal model.
+Task identities are compact PID labels and are not retained in an unbounded
+task table. Migration deliberately becomes paired departure/arrival sensory
+events so both CPU regions react.

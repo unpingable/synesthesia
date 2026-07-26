@@ -1,0 +1,5 @@
+# timestamp_ns	kind	cpu	source_cpu	target_cpu	pid	previous_pid	next_pid	previous_state
+1000000000	1	0	0	0	101	100	101	1
+1000100000	2	1	1	2	202	101	0	0
+1000200000	3	2	2	3	303	202	0	0
+1000300000	4	3	3	0	404	0	0	0

@@ -7,6 +7,7 @@ use crate::event::NormalizedEvent;
 pub mod demo;
 pub mod lines;
 pub mod ndjson;
+pub mod scheduler;
 pub mod tshark;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

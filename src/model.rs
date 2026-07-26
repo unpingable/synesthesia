@@ -63,8 +63,10 @@ impl TemporalModel {
         self.advance(now);
         let flow = stable_hash(event.flow_key().as_bytes());
         let lane_material = event
-            .origin
-            .as_deref()
+            .labels
+            .get("synesthesia.lane")
+            .map(String::as_str)
+            .or(event.origin.as_deref())
             .or(event.target.as_deref())
             .unwrap_or(&event.category);
         let lane = stable_hash(lane_material.as_bytes());

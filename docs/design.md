@@ -313,3 +313,7 @@ The archive installs nothing. Its helpers remain ordinary sibling executables
 with no setuid bit or file capability. Dynamic glibc linking and experimental
 kernel requirements are documented limitations rather than hidden installer
 behavior.
+
+The local feature, regression, and reproducibility evidence for the first
+binary release is recorded in
+[v0.2.0-qualification.md](v0.2.0-qualification.md).

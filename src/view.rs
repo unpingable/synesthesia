@@ -2,7 +2,7 @@ use crate::{
     cli::{DisplayMode, ViewKind},
     event::Direction,
     flight_recorder::{FlightState, FlightStatus},
-    model::{Activity, ModelSnapshot, Particle, ParticleStyle, TcpMetrics},
+    model::{Activity, ModelSnapshot, Particle, ParticleStyle, ProcMetrics, TcpMetrics},
     render::{Cell, RenderFrame},
     source::stable_hash,
 };
@@ -22,8 +22,18 @@ pub struct ViewOptions {
     pub collector_dropped: u64,
     pub ipc_dropped: u64,
     pub flight: Option<FlightStatus>,
+    pub proc: Option<ProcSourceStatus>,
     pub particles: bool,
     pub help: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ProcSourceStatus {
+    pub interval_ms: u64,
+    pub tracked: u64,
+    pub unreadable: u64,
+    pub vanished: u64,
+    pub source_dropped: u64,
 }
 
 pub fn compose(
@@ -55,6 +65,10 @@ pub fn compose(
         tcp_status(snapshot, tcp, width, options)
     } else if let Some(scheduler) = &snapshot.metrics.scheduler {
         scheduler_status(snapshot, scheduler, width, options)
+    } else if let Some(proc) = &snapshot.metrics.proc {
+        proc_status(snapshot, proc, width, options)
+    } else if options.proc.is_some() {
+        proc_status(snapshot, &ProcMetrics::default(), width, options)
     } else {
         format!(
             " {:>5.1} evt/s  {:>7}/s  {:>3} flows  bad {} drop {}  {:?}/{:?}{}",
@@ -87,6 +101,58 @@ pub fn compose(
     }
     frame.write_status(&status);
     frame
+}
+
+fn proc_status(
+    snapshot: &ModelSnapshot,
+    proc: &ProcMetrics,
+    width: u16,
+    options: &ViewOptions,
+) -> String {
+    let state = if options.paused { " pause" } else { "" };
+    let source = options.proc.unwrap_or_default();
+    let interval = options.proc.map_or_else(
+        || "replay".to_owned(),
+        |status| format!("{}ms", status.interval_ms),
+    );
+    if width < 110 {
+        format!(
+            " {} proc/s cpu {} io {} +/- {}/{} active {} {} miss {}/{} drop {}/{} {}/{}{}",
+            compact_magnitude(snapshot.metrics.events_per_second),
+            compact_magnitude(proc.cpu_events_per_second),
+            compact_magnitude(proc.io_events_per_second),
+            compact_magnitude(proc.starts_per_second),
+            compact_magnitude(proc.exits_per_second),
+            source.tracked.max(proc.active_processes as u64),
+            interval,
+            source.unreadable,
+            source.vanished,
+            source.source_dropped,
+            options.dropped,
+            short_view(options.view),
+            short_mode(options.mode),
+            state,
+        )
+    } else {
+        format!(
+            " {} proc/s  {} cpu  {} io  start/exit {}/{}  {} active  {}  unread/vanish {}/{}  drop source/user {}/{}  {:?}/{:?}{}",
+            compact_magnitude(snapshot.metrics.events_per_second),
+            compact_magnitude(proc.cpu_events_per_second),
+            compact_magnitude(proc.io_events_per_second),
+            compact_magnitude(proc.starts_per_second),
+            compact_magnitude(proc.exits_per_second),
+            source.tracked.max(proc.active_processes as u64),
+            interval,
+            source.unreadable,
+            source.vanished,
+            source.source_dropped,
+            options.dropped,
+            options.view,
+            options.mode,
+            state,
+        )
+        .to_lowercase()
+    }
 }
 
 fn particle_overlay(
@@ -724,6 +790,7 @@ mod tests {
             collector_dropped: 0,
             ipc_dropped: 0,
             flight: None,
+            proc: None,
             particles: true,
             help: false,
         }
@@ -873,6 +940,61 @@ mod tests {
             model.ingest(event, now);
         }
         model.snapshot()
+    }
+
+    fn proc_fixture_snapshot() -> ModelSnapshot {
+        let mut model = TemporalModel::default();
+        for line in include_str!("../tests/fixtures/proc-activity.ndjson").lines() {
+            let event: NormalizedEvent = serde_json::from_str(line).unwrap();
+            model.ingest(event.clone(), event.timestamp.unwrap());
+        }
+        model.snapshot()
+    }
+
+    #[test]
+    fn proc_fixture_snapshot_is_deterministic_with_compact_source_status() {
+        let mut proc_options = options(ViewKind::Weather, DisplayMode::Ascii);
+        proc_options.proc = Some(ProcSourceStatus {
+            interval_ms: 250,
+            tracked: 4,
+            unreadable: 2,
+            vanished: 1,
+            source_dropped: 3,
+        });
+        let render = || compose(&proc_fixture_snapshot(), 100, 30, &proc_options).plain_text();
+        let first = render();
+        assert_eq!(first, render());
+        let status = first.lines().last().unwrap();
+        assert!(status.contains("proc/s"));
+        assert!(status.contains("250ms"));
+        assert!(status.contains("miss 2/1 drop 3"));
+        assert!(!status.contains('@'));
+    }
+
+    #[test]
+    fn proc_cpu_and_io_have_distinct_directional_weather() {
+        let base: NormalizedEvent = serde_json::from_str(
+            include_str!("../tests/fixtures/proc-activity.ndjson")
+                .lines()
+                .nth(2)
+                .unwrap(),
+        )
+        .unwrap();
+        let render = |category: &str, direction: Direction| {
+            let mut event = base.clone();
+            event.category = category.to_owned();
+            event.direction = direction;
+            let mut model = TemporalModel::default();
+            model.ingest(event, 0.0);
+            let mut render_options = options(ViewKind::Weather, DisplayMode::Ascii);
+            render_options.particles = false;
+            compose(&model.snapshot(), 80, 24, &render_options).plain_text()
+        };
+        let cpu = render("proc.cpu", Direction::Neutral);
+        let read = render("proc.io.read", Direction::Inbound);
+        let write = render("proc.io.write", Direction::Outbound);
+        assert_ne!(cpu, read);
+        assert_ne!(read, write);
     }
 
     #[test]

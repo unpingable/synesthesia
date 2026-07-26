@@ -52,6 +52,7 @@ pub struct Metrics {
     pub active_flows: usize,
     pub scheduler: Option<SchedulerMetrics>,
     pub tcp: Option<TcpMetrics>,
+    pub proc: Option<ProcMetrics>,
     pub flight: Option<FlightReplayMetrics>,
     pub particle_evictions: u64,
 }
@@ -79,6 +80,15 @@ pub struct TcpMetrics {
     pub resets_sent_per_second: f64,
     pub resets_received_per_second: f64,
     pub active_pathological_flows: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProcMetrics {
+    pub cpu_events_per_second: f64,
+    pub io_events_per_second: f64,
+    pub starts_per_second: f64,
+    pub exits_per_second: f64,
+    pub active_processes: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -381,6 +391,7 @@ impl TemporalModel {
         });
         let scheduler = self.scheduler_metrics(elapsed);
         let tcp = self.tcp_metrics(elapsed);
+        let proc = self.proc_metrics(elapsed);
         ModelSnapshot {
             now: self.now,
             decay_seconds: self.decay_seconds,
@@ -398,6 +409,7 @@ impl TemporalModel {
                 active_flows: self.flows.len(),
                 scheduler,
                 tcp,
+                proc,
                 flight: self.flight.clone(),
                 particle_evictions: self.particle_evictions,
             },
@@ -470,6 +482,48 @@ impl TemporalModel {
             resets_sent_per_second: rate(reset_sent),
             resets_received_per_second: rate(reset_received),
             active_pathological_flows,
+        })
+    }
+
+    fn proc_metrics(&self, elapsed: f64) -> Option<ProcMetrics> {
+        let cpu = stable_hash(b"proc.cpu");
+        let read = stable_hash(b"proc.io.read");
+        let write = stable_hash(b"proc.io.write");
+        let start = stable_hash(b"proc.start");
+        let exit = stable_hash(b"proc.exit");
+        let background = stable_hash(b"proc.background");
+        let runqueue = stable_hash(b"host.runqueue");
+        let memory = stable_hash(b"host.memory.pressure");
+        let categories = [cpu, read, write, start, exit, background, runqueue, memory];
+        if !self
+            .rates
+            .iter()
+            .any(|sample| categories.contains(&sample.category))
+        {
+            return None;
+        }
+        let rate = |wanted: &[u64]| {
+            self.rates
+                .iter()
+                .filter(|sample| wanted.contains(&sample.category))
+                .map(|sample| sample.count)
+                .sum::<f64>()
+                / elapsed
+        };
+        let process_categories = [cpu, read, write, start, exit];
+        let active_processes = self
+            .activity
+            .iter()
+            .filter(|activity| process_categories.contains(&activity.category))
+            .map(|activity| activity.lane)
+            .collect::<HashSet<_>>()
+            .len();
+        Some(ProcMetrics {
+            cpu_events_per_second: rate(&[cpu]),
+            io_events_per_second: rate(&[read, write]),
+            starts_per_second: rate(&[start]),
+            exits_per_second: rate(&[exit]),
+            active_processes,
         })
     }
 }
@@ -682,6 +736,33 @@ mod tests {
         assert_eq!(snapshot.metrics.events_per_second, 0.0);
         assert_eq!(snapshot.metrics.active_flows, 0);
         assert!(snapshot.metrics.tcp.is_none());
+    }
+
+    #[test]
+    fn proc_fixture_exposes_cpu_io_churn_and_stable_active_processes() {
+        let mut model = TemporalModel::default();
+        for line in include_str!("../tests/fixtures/proc-activity.ndjson").lines() {
+            let event: NormalizedEvent = serde_json::from_str(line).unwrap();
+            model.ingest(event.clone(), event.timestamp.unwrap());
+        }
+        let snapshot = model.snapshot();
+        let proc = snapshot.metrics.proc.unwrap();
+        assert_eq!(proc.cpu_events_per_second, 0.0);
+        assert_eq!(proc.io_events_per_second, 0.0);
+        assert!(proc.active_processes >= 3);
+
+        let mut active = TemporalModel::default();
+        for line in include_str!("../tests/fixtures/proc-activity.ndjson")
+            .lines()
+            .skip(2)
+            .take(8)
+        {
+            let event: NormalizedEvent = serde_json::from_str(line).unwrap();
+            active.ingest(event.clone(), event.timestamp.unwrap());
+        }
+        let proc = active.snapshot().metrics.proc.unwrap();
+        assert!(proc.cpu_events_per_second > 0.0);
+        assert!(proc.io_events_per_second > 0.0);
     }
 
     #[test]

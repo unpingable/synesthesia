@@ -627,6 +627,143 @@ pub enum ProcParseError {
     MalformedProcessStat,
 }
 
+#[cfg(target_os = "linux")]
+pub struct LiveProcSource {
+    root: std::path::PathBuf,
+    pid: Option<u32>,
+    tracker: ProcTracker,
+}
+
+#[cfg(target_os = "linux")]
+impl LiveProcSource {
+    pub fn new(pid: Option<u32>, anonymize: bool, session_seed: u64) -> Self {
+        Self {
+            root: std::path::PathBuf::from("/proc"),
+            pid,
+            tracker: ProcTracker::new(anonymize, session_seed),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_root(
+        root: std::path::PathBuf,
+        pid: Option<u32>,
+        anonymize: bool,
+        session_seed: u64,
+    ) -> Self {
+        Self {
+            root,
+            pid,
+            tracker: ProcTracker::new(anonymize, session_seed),
+        }
+    }
+
+    pub fn sample(&mut self, timestamp: f64) -> Result<Vec<NormalizedEvent>, ProcSourceError> {
+        let mut sample = ProcSample::new(timestamp);
+        let stat_path = self.root.join("stat");
+        sample.stat = parse_proc_stat(&std::fs::read_to_string(&stat_path).map_err(|source| {
+            ProcSourceError::ReadHost {
+                path: stat_path,
+                source,
+            }
+        })?)?;
+        let memory_path = self.root.join("meminfo");
+        match std::fs::read_to_string(&memory_path) {
+            Ok(input) => match parse_meminfo(&input) {
+                Ok(memory) => sample.memory = Some(memory),
+                Err(_) => sample.unreadable = sample.unreadable.saturating_add(1),
+            },
+            Err(_) => sample.unreadable = sample.unreadable.saturating_add(1),
+        }
+
+        if let Some(pid) = self.pid {
+            read_process(&self.root, pid, &mut sample);
+        } else {
+            let entries =
+                std::fs::read_dir(&self.root).map_err(|source| ProcSourceError::ReadHost {
+                    path: self.root.clone(),
+                    source,
+                })?;
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    sample.unreadable = sample.unreadable.saturating_add(1);
+                    continue;
+                };
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                read_process(&self.root, pid, &mut sample);
+            }
+        }
+        Ok(self.tracker.ingest(sample))
+    }
+
+    pub fn stats(&self) -> ProcStats {
+        self.tracker.stats()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_process(root: &std::path::Path, pid: u32, sample: &mut ProcSample) {
+    if sample.processes.len() == MAX_SCANNED_PROCESSES {
+        sample.scan_refused = sample.scan_refused.saturating_add(1);
+        return;
+    }
+    let process_root = root.join(pid.to_string());
+    let stat_path = process_root.join("stat");
+    let stat = match std::fs::read_to_string(&stat_path) {
+        Ok(input) => match parse_process_stat(&input) {
+            Ok(stat) => stat,
+            Err(_) => {
+                sample.unreadable = sample.unreadable.saturating_add(1);
+                return;
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            sample.vanished = sample.vanished.saturating_add(1);
+            return;
+        }
+        Err(_) => {
+            sample.unreadable = sample.unreadable.saturating_add(1);
+            return;
+        }
+    };
+    let mut process = stat;
+    let io_path = process_root.join("io");
+    match std::fs::read_to_string(io_path) {
+        Ok(input) => match parse_process_io(&input) {
+            Ok((read_bytes, write_bytes)) => {
+                process.read_bytes = Some(read_bytes);
+                process.write_bytes = Some(write_bytes);
+            }
+            Err(_) => sample.unreadable = sample.unreadable.saturating_add(1),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            sample.vanished = sample.vanished.saturating_add(1);
+        }
+        Err(_) => sample.unreadable = sample.unreadable.saturating_add(1),
+    }
+    sample.push_process(process);
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProcSourceError {
+    #[error("the proc activity source is supported only on Linux")]
+    UnsupportedOperatingSystem,
+    #[error("could not read Linux procfs path {path}: {source}")]
+    ReadHost {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("could not parse Linux procfs host record: {0}")]
+    Parse(#[from] ProcParseError),
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -921,5 +1058,83 @@ mod tests {
             ])
         );
         assert_eq!(previous, 5.0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_reader_boundary_uses_injected_proc_root_not_the_host() {
+        use std::{
+            fs,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("synesthesia-proc-fixture-{unique}"));
+        let process_root = root.join("42");
+        fs::create_dir_all(&process_root).unwrap();
+        fs::write(
+            root.join("stat"),
+            "cpu  10 2 3 40 5 6 7 8 9 10\nprocs_running 1\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("meminfo"),
+            "MemTotal: 1000 kB\nMemAvailable: 600 kB\n",
+        )
+        .unwrap();
+        fs::write(
+            process_root.join("stat"),
+            "42 (compiler worker) R 1 2 3 4 5 6 7 8 9 10 13 17 14 15 16 17 18 19 1234 21",
+        )
+        .unwrap();
+        fs::write(
+            process_root.join("io"),
+            "read_bytes: 4096\nwrite_bytes: 8192\n",
+        )
+        .unwrap();
+
+        let mut source = LiveProcSource::with_root(root.clone(), Some(42), false, 1);
+        assert!(source.sample(0.0).unwrap().is_empty());
+        fs::write(
+            process_root.join("stat"),
+            "42 (compiler worker) R 1 2 3 4 5 6 7 8 9 10 23 27 14 15 16 17 18 19 1234 21",
+        )
+        .unwrap();
+        fs::write(
+            process_root.join("io"),
+            "read_bytes: 8192\nwrite_bytes: 16384\n",
+        )
+        .unwrap();
+        let events = source.sample(0.25).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.category.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["proc.cpu", "proc.io.read", "proc.io.write"])
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_reader_classifies_missing_host_procfs_without_falling_back() {
+        let missing = std::env::temp_dir().join("synesthesia-proc-definitely-missing");
+        let mut source = LiveProcSource::with_root(missing, None, false, 1);
+        assert!(matches!(
+            source.sample(0.0),
+            Err(ProcSourceError::ReadHost { .. })
+        ));
+    }
+
+    #[test]
+    fn unsupported_platform_error_is_explicit() {
+        assert_eq!(
+            ProcSourceError::UnsupportedOperatingSystem.to_string(),
+            "the proc activity source is supported only on Linux"
+        );
     }
 }

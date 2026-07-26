@@ -13,8 +13,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
 use crate::{
     cli::{
-        DemoArgs, DisplayMode, InputFormat, ParticleMode, ReplayArgs, SchedulerArgs, StdinArgs,
-        TcpArgs, Theme, ViewKind, VisualArgs,
+        DemoArgs, DisplayMode, InputFormat, ParticleMode, ProcArgs, ReplayArgs, SchedulerArgs,
+        StdinArgs, TcpArgs, Theme, ViewKind, VisualArgs,
     },
     flight_runtime::FlightRuntime,
     ingestion::{Ingress, event_buffer},
@@ -26,7 +26,7 @@ use crate::{
         tshark::TsharkTsvSource,
     },
     terminal::{TerminalSession, TerminationFlag},
-    view::{ViewOptions, compose},
+    view::{ProcSourceStatus, ViewOptions, compose},
 };
 
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
@@ -54,6 +54,12 @@ enum Producer {
     Replay {
         replay: ReplaySource,
     },
+    #[cfg(target_os = "linux")]
+    Proc {
+        source: crate::source::procfs::LiveProcSource,
+        interval: Duration,
+        recorder: Option<Recorder>,
+    },
     #[cfg(all(target_os = "linux", feature = "ebpf"))]
     Scheduler {
         helper: crate::source::scheduler_helper::SchedulerHelper,
@@ -75,6 +81,12 @@ struct ProducerStats {
     collector_dropped: AtomicU64,
     ipc_dropped: AtomicU64,
     renderer_dropped: AtomicU64,
+    proc_interval_ms: AtomicU64,
+    proc_tracked: AtomicU64,
+    proc_unreadable: AtomicU64,
+    proc_vanished: AtomicU64,
+    proc_source_dropped: AtomicU64,
+    proc_failed: AtomicBool,
 }
 
 pub fn run_demo(args: DemoArgs) -> Result<()> {
@@ -107,6 +119,33 @@ pub fn run_replay(args: ReplayArgs) -> Result<()> {
     let visual = args.visual.clone();
     let replay = ReplaySource::open(&args.path, args.speed)?;
     run_interactive(Producer::Replay { replay }, visual, None)
+}
+
+pub fn run_proc(args: ProcArgs) -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = args;
+        Err(crate::source::procfs::ProcSourceError::UnsupportedOperatingSystem.into())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let source =
+            crate::source::procfs::LiveProcSource::new(args.pid, args.anonymize, session_seed());
+        if args.visual.snapshot || !io::stdout().is_terminal() {
+            return snapshot_proc(source, args);
+        }
+        let visual = args.visual.clone();
+        let recorder = args.record.as_deref().map(Recorder::create).transpose()?;
+        run_interactive(
+            Producer::Proc {
+                source,
+                interval: args.interval,
+                recorder,
+            },
+            visual,
+            None,
+        )
+    }
 }
 
 pub fn run_scheduler(args: SchedulerArgs) -> Result<()> {
@@ -320,11 +359,45 @@ fn snapshot_replay(args: ReplayArgs) -> Result<()> {
     )
 }
 
+#[cfg(target_os = "linux")]
+fn snapshot_proc(mut source: crate::source::procfs::LiveProcSource, args: ProcArgs) -> Result<()> {
+    let mut recorder = args.record.as_deref().map(Recorder::create).transpose()?;
+    let mut model = TemporalModel::default();
+    let started = Instant::now();
+    for event in source.sample(0.0)? {
+        model.ingest(event, 0.0);
+    }
+    for _ in 0..3 {
+        thread::sleep(args.interval);
+        let now = started.elapsed().as_secs_f64();
+        for event in source.sample(now)? {
+            if let Some(recorder) = &mut recorder {
+                recorder.record(&event)?;
+            }
+            model.ingest(event, now);
+        }
+    }
+    if let Some(recorder) = recorder {
+        recorder.finish()?;
+    }
+    let stats = source.stats();
+    print_snapshot(
+        &model,
+        &args.visual,
+        0,
+        SnapshotLosses {
+            proc: Some(proc_source_status(args.interval, stats)),
+            ..SnapshotLosses::default()
+        },
+    )
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct SnapshotLosses {
     kernel: u64,
     collector: u64,
     ipc: u64,
+    proc: Option<ProcSourceStatus>,
 }
 
 fn print_snapshot(
@@ -344,6 +417,7 @@ fn print_snapshot(
         collector_dropped: losses.collector,
         ipc_dropped: losses.ipc,
         flight: None,
+        proc: losses.proc,
         particles: visual.particles == ParticleMode::On,
         help: false,
     };
@@ -399,6 +473,11 @@ fn run_interactive(
                     break;
                 }
             }
+            if producer_stats.proc_failed.load(Ordering::Acquire) {
+                return Err(anyhow::anyhow!(
+                    "the proc activity sampler stopped because /proc host state could not be read or parsed"
+                ));
+            }
             let frame_started = Instant::now();
             let now = started.elapsed().as_secs_f64();
             if !state.paused {
@@ -423,6 +502,16 @@ fn run_interactive(
                 collector_dropped: producer_stats.collector_dropped.load(Ordering::Relaxed),
                 ipc_dropped: producer_stats.ipc_dropped.load(Ordering::Relaxed),
                 flight: flight.as_ref().map(FlightRuntime::status),
+                proc: {
+                    let interval_ms = producer_stats.proc_interval_ms.load(Ordering::Relaxed);
+                    (interval_ms > 0).then(|| ProcSourceStatus {
+                        interval_ms,
+                        tracked: producer_stats.proc_tracked.load(Ordering::Relaxed),
+                        unreadable: producer_stats.proc_unreadable.load(Ordering::Relaxed),
+                        vanished: producer_stats.proc_vanished.load(Ordering::Relaxed),
+                        source_dropped: producer_stats.proc_source_dropped.load(Ordering::Relaxed),
+                    })
+                },
                 particles: state.particles,
                 help: state.help,
             };
@@ -561,12 +650,15 @@ fn spawn_producer(
     stats: Arc<ProducerStats>,
 ) -> ProducerGuard {
     let stop = Arc::new(AtomicBool::new(false));
-    #[cfg(all(target_os = "linux", feature = "ebpf"))]
+    #[cfg(target_os = "linux")]
     let worker_stop = Arc::clone(&stop);
-    #[cfg(all(target_os = "linux", feature = "ebpf"))]
-    let is_live_collector = matches!(&producer, Producer::Scheduler { .. } | Producer::Tcp { .. });
-    #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
-    let is_live_collector = false;
+    let needs_join = match &producer {
+        #[cfg(target_os = "linux")]
+        Producer::Proc { .. } => true,
+        #[cfg(all(target_os = "linux", feature = "ebpf"))]
+        Producer::Scheduler { .. } | Producer::Tcp { .. } => true,
+        _ => false,
+    };
     let join = thread::spawn(move || match producer {
         Producer::Demo { seed } => {
             for generated in DemoSource::new(seed) {
@@ -616,6 +708,38 @@ fn spawn_producer(
                 stats
                     .malformed
                     .store(replay.stats().malformed, Ordering::Relaxed);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        Producer::Proc {
+            mut source,
+            interval,
+            mut recorder,
+        } => {
+            stats
+                .proc_interval_ms
+                .store(interval.as_millis() as u64, Ordering::Relaxed);
+            let started = Instant::now();
+            while !worker_stop.load(Ordering::Acquire) {
+                match source.sample(started.elapsed().as_secs_f64()) {
+                    Ok(events) => {
+                        for incoming in events {
+                            if let Some(recorder) = &mut recorder {
+                                let _ = recorder.record(&incoming);
+                            }
+                            ingress.submit(incoming);
+                        }
+                        update_proc_stats(&stats, interval, source.stats());
+                    }
+                    Err(_) => {
+                        stats.proc_failed.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+                interruptible_sleep(interval, &worker_stop);
+            }
+            if let Some(recorder) = recorder {
+                let _ = recorder.finish();
             }
         }
         #[cfg(all(target_os = "linux", feature = "ebpf"))]
@@ -706,8 +830,68 @@ fn spawn_producer(
     });
     ProducerGuard {
         stop,
-        join: is_live_collector.then_some(join),
+        join: needs_join.then_some(join),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn proc_source_status(
+    interval: Duration,
+    stats: crate::source::procfs::ProcStats,
+) -> ProcSourceStatus {
+    ProcSourceStatus {
+        interval_ms: interval.as_millis() as u64,
+        tracked: stats.tracked_processes as u64,
+        unreadable: stats.unreadable,
+        vanished: stats.vanished,
+        source_dropped: stats
+            .scan_refused
+            .saturating_add(stats.tracking_refused)
+            .saturating_add(stats.event_refused),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn update_proc_stats(
+    destination: &ProducerStats,
+    interval: Duration,
+    source: crate::source::procfs::ProcStats,
+) {
+    let status = proc_source_status(interval, source);
+    destination
+        .proc_tracked
+        .store(status.tracked, Ordering::Relaxed);
+    destination
+        .proc_unreadable
+        .store(status.unreadable, Ordering::Relaxed);
+    destination
+        .proc_vanished
+        .store(status.vanished, Ordering::Relaxed);
+    destination
+        .proc_source_dropped
+        .store(status.source_dropped, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "linux")]
+fn interruptible_sleep(duration: Duration, stop: &AtomicBool) {
+    let deadline = Instant::now() + duration;
+    while !stop.load(Ordering::Acquire) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        thread::sleep(remaining.min(Duration::from_millis(25)));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn session_seed() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos() as u64)
+        ^ u64::from(std::process::id())
 }
 
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
@@ -756,6 +940,7 @@ mod tests {
             collector_dropped: 0,
             ipc_dropped: 0,
             flight: None,
+            proc: None,
             particles: true,
             help: false,
         };

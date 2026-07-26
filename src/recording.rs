@@ -205,6 +205,25 @@ mod tests {
     }
 
     #[test]
+    fn sanitized_proc_fixture_replays_cpu_io_and_churn_without_privilege() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc-activity.ndjson");
+        let mut replay = ReplaySource::open(&path, 2.0).unwrap();
+        let mut categories = std::collections::BTreeSet::new();
+        let mut total_delay = Duration::ZERO;
+        while let Some((delay, event)) = replay.next_timed().unwrap() {
+            total_delay += delay;
+            categories.insert(event.category);
+        }
+        assert!(categories.contains("proc.cpu"));
+        assert!(categories.contains("proc.io.read"));
+        assert!(categories.contains("proc.io.write"));
+        assert!(categories.contains("proc.start"));
+        assert!(categories.contains("proc.exit"));
+        assert_eq!(total_delay, Duration::from_millis(2_525));
+    }
+
+    #[test]
     fn flight_metadata_is_validated_skipped_and_trigger_is_exposed() {
         for (fixture, source) in [
             ("tcp-flight-incident.ndjson", "tcp"),

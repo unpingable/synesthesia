@@ -17,6 +17,7 @@ fn main() -> Result<()> {
         Command::Demo(args) => app::run_demo(args)?,
         Command::Stdin(args) => app::run_stdin(args)?,
         Command::Replay(args) => app::run_replay(args)?,
+        Command::Proc(args) => app::run_proc(args)?,
         Command::Ebpf(args) => match args.source {
             synesthesia::cli::EbpfSource::Scheduler(args) => app::run_scheduler(args)?,
             synesthesia::cli::EbpfSource::Tcp(args) => app::run_tcp(args)?,

@@ -24,6 +24,8 @@ pub enum Command {
     Stdin(StdinArgs),
     /// Replay a normalized NDJSON recording.
     Replay(ReplayArgs),
+    /// Render unprivileged Linux process and host activity from /proc.
+    Proc(ProcArgs),
     /// Experimental Linux kernel activity sources.
     Ebpf(EbpfArgs),
     /// Print the supported NDJSON wire schema and an example.
@@ -62,6 +64,24 @@ pub struct TcpArgs {
     pub record: Option<PathBuf>,
     #[command(flatten)]
     pub flight: FlightArgs,
+    #[command(flatten)]
+    pub visual: VisualArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct ProcArgs {
+    /// Sample only one process ID.
+    #[arg(long)]
+    pub pid: Option<u32>,
+    /// Sampling interval from 50ms through 5s.
+    #[arg(long, default_value = "250ms", value_parser = parse_proc_interval)]
+    pub interval: Duration,
+    /// Replace process names and PIDs with stable session-local identities.
+    #[arg(long)]
+    pub anonymize: bool,
+    /// Save normalized process events as NDJSON.
+    #[arg(long)]
+    pub record: Option<PathBuf>,
     #[command(flatten)]
     pub visual: VisualArgs,
 }
@@ -202,6 +222,15 @@ fn parse_duration(value: &str) -> Result<Duration, String> {
     }
 }
 
+fn parse_proc_interval(value: &str) -> Result<Duration, String> {
+    let duration = parse_duration(value)?;
+    if (Duration::from_millis(50)..=Duration::from_secs(5)).contains(&duration) {
+        Ok(duration)
+    } else {
+        Err("proc interval must be between 50ms and 5s".to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +280,28 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn proc_options_are_narrow_and_interval_is_bounded() {
+        let cli = Cli::try_parse_from([
+            "synesthesia",
+            "proc",
+            "--pid",
+            "42",
+            "--interval",
+            "500ms",
+            "--anonymize",
+            "--snapshot",
+        ])
+        .unwrap();
+        let Command::Proc(args) = cli.command else {
+            panic!("expected proc command");
+        };
+        assert_eq!(args.pid, Some(42));
+        assert_eq!(args.interval, Duration::from_millis(500));
+        assert!(args.anonymize);
+        assert!(Cli::try_parse_from(["synesthesia", "proc", "--interval", "10ms"]).is_err());
+        assert!(Cli::try_parse_from(["synesthesia", "proc", "--interval", "6s"]).is_err());
     }
 }

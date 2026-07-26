@@ -40,8 +40,13 @@ pub fn compose(
         }
     }
     let mut status = if options.help {
-        " q/esc quit  space pause  1 weather  2 waterfall  a ascii/ansi  c theme  +/- gain  [] decay "
-            .to_owned()
+        if options.flight.is_some() {
+            " t trigger  x cancel  q/esc cancel-or-finalize  space pause  1/2 view  a mode  c theme "
+                .to_owned()
+        } else {
+            " q/esc quit  space pause  1 weather  2 waterfall  a ascii/ansi  c theme  +/- gain  [] decay "
+                .to_owned()
+        }
     } else if let Some(tcp) = &snapshot.metrics.tcp {
         tcp_status(snapshot, tcp, width, options)
     } else if let Some(scheduler) = &snapshot.metrics.scheduler {
@@ -62,6 +67,19 @@ pub fn compose(
     };
     if let Some(flight) = &options.flight {
         status = format!(" {} |{}", flight_status(flight), status);
+    } else if let Some(flight) = &snapshot.metrics.flight {
+        status = format!(
+            " replay {} {} {} loss {}/{}/{}/{}/{} |{}",
+            flight.phase.to_uppercase(),
+            flight.source.as_deref().unwrap_or("incident"),
+            flight.trigger_kind.as_deref().unwrap_or("armed"),
+            flight.losses.kernel_ring,
+            flight.losses.collector,
+            flight.losses.ipc,
+            flight.losses.renderer_channel,
+            flight.losses.writer,
+            status
+        );
     }
     frame.write_status(&status);
     frame
@@ -221,6 +239,10 @@ fn weather(
         let age = (snapshot.now - activity.born).max(0.0);
         let life = (1.0 - age / (snapshot.decay_seconds * 2.5)).clamp(0.0, 1.0);
         if life <= 0.0 {
+            continue;
+        }
+        if activity.category == stable_hash(crate::flight_recorder::TRIGGER_CATEGORY.as_bytes()) {
+            trigger_marker(frame, field_height, life as f32, options.mode);
             continue;
         }
         if let Some(pathology) = tcp_visual(activity.category) {
@@ -465,6 +487,19 @@ fn waterfall(
         if age > history {
             continue;
         }
+        if activity.category == stable_hash(crate::flight_recorder::TRIGGER_CATEGORY.as_bytes()) {
+            let x = (f64::from(frame.width.saturating_sub(1))
+                * (1.0 - age / history).clamp(0.0, 1.0))
+            .round() as i32;
+            for y in 0..field_height {
+                frame.put(
+                    x,
+                    i32::from(y),
+                    marker_cell((1.0 - age / history) as f32, options.mode),
+                );
+            }
+            continue;
+        }
         let category = activity.category;
         let flow_band = (activity.flow % u64::from(field_height)) as u16;
         let category_band = (category % u64::from(field_height)) as u16;
@@ -531,6 +566,25 @@ fn waterfall(
                 visual_cell(intensity * 0.65, category, activity.direction, options.mode),
             );
         }
+    }
+}
+
+fn trigger_marker(frame: &mut RenderFrame, field_height: u16, intensity: f32, mode: DisplayMode) {
+    let x = i32::from(frame.width / 2);
+    for y in 0..field_height {
+        frame.put(x, i32::from(y), marker_cell(intensity, mode));
+    }
+}
+
+fn marker_cell(intensity: f32, mode: DisplayMode) -> Cell {
+    Cell {
+        glyph: match mode {
+            DisplayMode::Ascii => '|',
+            DisplayMode::Ansi => '│',
+        },
+        intensity: intensity.clamp(0.25, 1.0),
+        category: stable_hash(crate::flight_recorder::TRIGGER_CATEGORY.as_bytes()),
+        direction: Direction::Neutral,
     }
 }
 
@@ -870,5 +924,33 @@ mod tests {
         assert!(status.starts_with(" rec armed pre 8.4s evict 12 |"));
         assert!(status.contains("tcp/s"));
         assert!(!status.contains('@'));
+    }
+
+    #[test]
+    fn replay_trigger_marker_is_visible_and_phase_is_named() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tcp-flight-incident.ndjson");
+        let mut replay = crate::recording::ReplaySource::open(&path, 1.0).unwrap();
+        let mut model = crate::model::TemporalModel::default();
+        let mut now = 0.0;
+        while let Some((delay, event)) = replay.next_timed().unwrap() {
+            now += delay.as_secs_f64();
+            model.ingest(event, now);
+        }
+        let rendered = compose(
+            &model.snapshot(),
+            100,
+            30,
+            &options(ViewKind::Waterfall, DisplayMode::Ascii),
+        )
+        .plain_text();
+        assert!(rendered.lines().last().unwrap().contains("replay POST tcp"));
+        let rows: Vec<_> = rendered.lines().take(29).collect();
+        assert!((0..100).any(|column| {
+            rows.iter()
+                .filter(|row| row.chars().nth(column) == Some('|'))
+                .count()
+                > 10
+        }));
     }
 }

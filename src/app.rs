@@ -16,6 +16,7 @@ use crate::{
         DemoArgs, DisplayMode, InputFormat, ReplayArgs, SchedulerArgs, StdinArgs, TcpArgs, Theme,
         ViewKind, VisualArgs,
     },
+    flight_runtime::FlightRuntime,
     ingestion::{Ingress, event_buffer},
     model::TemporalModel,
     recording::{Recorder, ReplaySource},
@@ -26,6 +27,16 @@ use crate::{
     },
     terminal::{TerminalSession, TerminationFlag},
     view::{ViewOptions, compose},
+};
+
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
+use crate::{
+    cli::FlightArgs,
+    flight_recorder::{
+        DEFAULT_POST_TRIGGER, DEFAULT_PRE_TRIGGER, FlightConfig, FlightSource, IncidentLosses,
+    },
+    flight_runtime::FlightRuntimeSender,
+    trigger::TriggerSpec,
 };
 
 const CHANNEL_CAPACITY: usize = 2_048;
@@ -47,11 +58,13 @@ enum Producer {
     Scheduler {
         helper: crate::source::scheduler_helper::SchedulerHelper,
         recorder: Option<Recorder>,
+        flight: Option<FlightRuntimeSender>,
     },
     #[cfg(all(target_os = "linux", feature = "ebpf"))]
     Tcp {
         helper: crate::source::tcp_helper::TcpHelper,
         recorder: Option<Recorder>,
+        flight: Option<FlightRuntimeSender>,
     },
 }
 
@@ -61,13 +74,14 @@ struct ProducerStats {
     kernel_dropped: AtomicU64,
     collector_dropped: AtomicU64,
     ipc_dropped: AtomicU64,
+    renderer_dropped: AtomicU64,
 }
 
 pub fn run_demo(args: DemoArgs) -> Result<()> {
     if args.visual.snapshot || !io::stdout().is_terminal() {
         return snapshot_demo(&args);
     }
-    run_interactive(Producer::Demo { seed: args.seed }, args.visual)
+    run_interactive(Producer::Demo { seed: args.seed }, args.visual, None)
 }
 
 pub fn run_stdin(args: StdinArgs) -> Result<()> {
@@ -82,6 +96,7 @@ pub fn run_stdin(args: StdinArgs) -> Result<()> {
             recorder,
         },
         visual,
+        None,
     )
 }
 
@@ -91,7 +106,7 @@ pub fn run_replay(args: ReplayArgs) -> Result<()> {
     }
     let visual = args.visual.clone();
     let replay = ReplaySource::open(&args.path, args.speed)?;
-    run_interactive(Producer::Replay { replay }, visual)
+    run_interactive(Producer::Replay { replay }, visual, None)
 }
 
 pub fn run_scheduler(args: SchedulerArgs) -> Result<()> {
@@ -107,12 +122,29 @@ pub fn run_scheduler(args: SchedulerArgs) -> Result<()> {
     }
     #[cfg(all(target_os = "linux", feature = "ebpf"))]
     {
+        if args.flight.flight_recorder.is_some()
+            && (args.visual.snapshot || !io::stdout().is_terminal())
+        {
+            return Err(anyhow::anyhow!(
+                "flight recording requires an interactive terminal; replay the completed incident for snapshots"
+            ));
+        }
+        let flight = flight_runtime(&args.flight, FlightSource::Scheduler)?;
+        let flight_sender = flight.as_ref().map(FlightRuntime::sender);
         let helper = crate::source::scheduler_helper::SchedulerHelper::spawn()?;
         if args.visual.snapshot || !io::stdout().is_terminal() {
             return snapshot_scheduler(helper, args);
         }
         let recorder = args.record.as_deref().map(Recorder::create).transpose()?;
-        run_interactive(Producer::Scheduler { helper, recorder }, args.visual)
+        run_interactive(
+            Producer::Scheduler {
+                helper,
+                recorder,
+                flight: flight_sender,
+            },
+            args.visual,
+            flight,
+        )
     }
 }
 
@@ -129,13 +161,49 @@ pub fn run_tcp(args: TcpArgs) -> Result<()> {
     }
     #[cfg(all(target_os = "linux", feature = "ebpf"))]
     {
+        if args.flight.flight_recorder.is_some()
+            && (args.visual.snapshot || !io::stdout().is_terminal())
+        {
+            return Err(anyhow::anyhow!(
+                "flight recording requires an interactive terminal; replay the completed incident for snapshots"
+            ));
+        }
+        let flight = flight_runtime(&args.flight, FlightSource::Tcp)?;
+        let flight_sender = flight.as_ref().map(FlightRuntime::sender);
         let helper = crate::source::tcp_helper::TcpHelper::spawn()?;
         if args.visual.snapshot || !io::stdout().is_terminal() {
             return snapshot_tcp(helper, args);
         }
         let recorder = args.record.as_deref().map(Recorder::create).transpose()?;
-        run_interactive(Producer::Tcp { helper, recorder }, args.visual)
+        run_interactive(
+            Producer::Tcp {
+                helper,
+                recorder,
+                flight: flight_sender,
+            },
+            args.visual,
+            flight,
+        )
     }
+}
+
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
+fn flight_runtime(args: &FlightArgs, source: FlightSource) -> Result<Option<FlightRuntime>> {
+    let Some(output) = &args.flight_recorder else {
+        if args.pre_trigger != DEFAULT_PRE_TRIGGER
+            || args.post_trigger != DEFAULT_POST_TRIGGER
+            || args.trigger != TriggerSpec::Auto
+        {
+            return Err(anyhow::anyhow!(
+                "--pre-trigger, --post-trigger, and --trigger require --flight-recorder"
+            ));
+        }
+        return Ok(None);
+    };
+    let mut config = FlightConfig::new(output.clone(), source);
+    config.pre_trigger = args.pre_trigger;
+    config.post_trigger = args.post_trigger;
+    Ok(Some(FlightRuntime::spawn(config, args.trigger.clone())?))
 }
 
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
@@ -283,7 +351,11 @@ fn print_snapshot(
     Ok(())
 }
 
-fn run_interactive(producer: Producer, visual: VisualArgs) -> Result<()> {
+fn run_interactive(
+    producer: Producer,
+    visual: VisualArgs,
+    flight: Option<FlightRuntime>,
+) -> Result<()> {
     let termination = TerminationFlag::register()?;
     let (ingress, buffer) = event_buffer(CHANNEL_CAPACITY);
     let producer_stats = Arc::new(ProducerStats::default());
@@ -309,64 +381,101 @@ fn run_interactive(producer: Producer, visual: VisualArgs) -> Result<()> {
     let started = Instant::now();
     let mut drained = Vec::with_capacity(MAX_DRAIN_PER_FRAME);
 
-    loop {
-        if termination.requested() {
-            break;
-        }
-        let frame_started = Instant::now();
-        let now = started.elapsed().as_secs_f64();
-        if !state.paused {
-            drained.clear();
-            buffer.drain_into(&mut drained, MAX_DRAIN_PER_FRAME);
-            for incoming in drained.drain(..) {
-                model.ingest(incoming, now);
-            }
-            model.advance(now);
-        }
-        let size = session.terminal_mut().size()?;
-        let width = size.width.min(500);
-        let height = size.height.min(200);
-        let options = ViewOptions {
-            mode: state.mode,
-            view: state.view,
-            gain: state.gain,
-            paused: state.paused,
-            malformed: producer_stats.malformed.load(Ordering::Relaxed),
-            dropped: buffer.dropped(),
-            kernel_dropped: producer_stats.kernel_dropped.load(Ordering::Relaxed),
-            collector_dropped: producer_stats.collector_dropped.load(Ordering::Relaxed),
-            ipc_dropped: producer_stats.ipc_dropped.load(Ordering::Relaxed),
-            flight: None,
-            help: state.help,
-        };
-        let frame = compose(&model.snapshot(), width, height, &options);
-        session.terminal_mut().draw(|terminal_frame| {
-            terminal_frame.render_widget(
-                GridWidget {
-                    frame: &frame,
-                    mode: state.mode,
-                    theme: state.theme,
-                    truecolor,
-                },
-                terminal_frame.area(),
-            );
-        })?;
-
-        let remaining = FRAME_TIME.saturating_sub(frame_started.elapsed());
-        if event::poll(remaining)? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if handle_key(key.code, key.modifiers, &mut state, ansi_allowed) {
-                        break;
-                    }
-                    model.set_decay(state.decay);
+    let outcome = (|| -> Result<()> {
+        loop {
+            if termination.requested() {
+                if let Some(flight) = &flight {
+                    let _ = flight.interrupt();
                 }
-                Event::Resize(_, _) => {}
-                _ => {}
+                break;
             }
+            if let Some(flight) = &flight {
+                if let Some(error) = flight.error() {
+                    return Err(anyhow::anyhow!("flight recorder failed: {error}"));
+                }
+                if flight.published() {
+                    break;
+                }
+            }
+            let frame_started = Instant::now();
+            let now = started.elapsed().as_secs_f64();
+            if !state.paused {
+                drained.clear();
+                buffer.drain_into(&mut drained, MAX_DRAIN_PER_FRAME);
+                for incoming in drained.drain(..) {
+                    model.ingest(incoming, now);
+                }
+                model.advance(now);
+            }
+            let size = session.terminal_mut().size()?;
+            let width = size.width.min(500);
+            let height = size.height.min(200);
+            let options = ViewOptions {
+                mode: state.mode,
+                view: state.view,
+                gain: state.gain,
+                paused: state.paused,
+                malformed: producer_stats.malformed.load(Ordering::Relaxed),
+                dropped: buffer.dropped(),
+                kernel_dropped: producer_stats.kernel_dropped.load(Ordering::Relaxed),
+                collector_dropped: producer_stats.collector_dropped.load(Ordering::Relaxed),
+                ipc_dropped: producer_stats.ipc_dropped.load(Ordering::Relaxed),
+                flight: flight.as_ref().map(FlightRuntime::status),
+                help: state.help,
+            };
+            let frame = compose(&model.snapshot(), width, height, &options);
+            session.terminal_mut().draw(|terminal_frame| {
+                terminal_frame.render_widget(
+                    GridWidget {
+                        frame: &frame,
+                        mode: state.mode,
+                        theme: state.theme,
+                        truecolor,
+                    },
+                    terminal_frame.area(),
+                );
+            })?;
+
+            let remaining = FRAME_TIME.saturating_sub(frame_started.elapsed());
+            if event::poll(remaining)? {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        if key.code == KeyCode::Char('t') {
+                            if let Some(flight) = &flight {
+                                flight.manual_trigger()?;
+                            }
+                            continue;
+                        }
+                        if key.code == KeyCode::Char('x') {
+                            if let Some(flight) = &flight {
+                                flight.cancel()?;
+                            }
+                            continue;
+                        }
+                        if handle_key(key.code, key.modifiers, &mut state, ansi_allowed) {
+                            if let Some(flight) = &flight {
+                                let _ = flight.interrupt();
+                            }
+                            break;
+                        }
+                        model.set_decay(state.decay);
+                    }
+                    Event::Resize(_, _) => {}
+                    _ => {}
+                }
+            }
+            producer_stats
+                .renderer_dropped
+                .store(buffer.dropped(), Ordering::Relaxed);
+        }
+        Ok(())
+    })();
+    if outcome.is_err() {
+        if let Some(flight) = &flight {
+            let _ = flight.renderer_failed();
         }
     }
-    Ok(())
+    outcome
 }
 
 struct UiState {
@@ -500,6 +609,7 @@ fn spawn_producer(
         Producer::Scheduler {
             mut helper,
             mut recorder,
+            flight,
         } => {
             while !worker_stop.load(Ordering::Acquire) {
                 match helper.next_pulse() {
@@ -510,7 +620,13 @@ fn spawn_producer(
                         stats
                             .collector_dropped
                             .store(pulse.collector_drops, Ordering::Relaxed);
+                        if let Some(flight) = &flight {
+                            flight.update_losses(incident_losses(&stats));
+                        }
                         if let Some(incoming) = pulse.into_normalized() {
+                            if let Some(flight) = &flight {
+                                flight.observe(incoming.clone(), incident_losses(&stats));
+                            }
                             if let Some(recorder) = &mut recorder {
                                 let _ = recorder.record(&incoming);
                             }
@@ -520,6 +636,9 @@ fn spawn_producer(
                     Ok(None) => {}
                     Err(_) => {
                         stats.malformed.fetch_add(1, Ordering::Relaxed);
+                        if let Some(flight) = &flight {
+                            flight.source_failed();
+                        }
                         break;
                     }
                 }
@@ -532,6 +651,7 @@ fn spawn_producer(
         Producer::Tcp {
             mut helper,
             mut recorder,
+            flight,
         } => {
             while !worker_stop.load(Ordering::Acquire) {
                 match helper.next_pulse() {
@@ -543,7 +663,13 @@ fn spawn_producer(
                             .collector_dropped
                             .store(pulse.collector_drops, Ordering::Relaxed);
                         stats.ipc_dropped.store(pulse.ipc_drops, Ordering::Relaxed);
+                        if let Some(flight) = &flight {
+                            flight.update_losses(incident_losses(&stats));
+                        }
                         if let Some(incoming) = pulse.into_normalized() {
+                            if let Some(flight) = &flight {
+                                flight.observe(incoming.clone(), incident_losses(&stats));
+                            }
                             if let Some(recorder) = &mut recorder {
                                 let _ = recorder.record(&incoming);
                             }
@@ -553,6 +679,9 @@ fn spawn_producer(
                     Ok(None) => {}
                     Err(_) => {
                         stats.malformed.fetch_add(1, Ordering::Relaxed);
+                        if let Some(flight) = &flight {
+                            flight.source_failed();
+                        }
                         break;
                     }
                 }
@@ -565,6 +694,18 @@ fn spawn_producer(
     ProducerGuard {
         stop,
         join: is_live_collector.then_some(join),
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
+fn incident_losses(stats: &ProducerStats) -> IncidentLosses {
+    IncidentLosses {
+        kernel_ring: stats.kernel_dropped.load(Ordering::Relaxed),
+        collector: stats.collector_dropped.load(Ordering::Relaxed),
+        ipc: stats.ipc_dropped.load(Ordering::Relaxed),
+        renderer_channel: stats.renderer_dropped.load(Ordering::Relaxed),
+        malformed: stats.malformed.load(Ordering::Relaxed),
+        writer: 0,
     }
 }
 

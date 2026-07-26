@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::{
     event::{Direction, NormalizedEvent},
+    flight_recorder::{IncidentLosses, METADATA_CATEGORY, PHASE_LABEL, TRIGGER_CATEGORY},
     source::stable_hash,
 };
 
@@ -26,6 +27,16 @@ pub struct Metrics {
     pub active_flows: usize,
     pub scheduler: Option<SchedulerMetrics>,
     pub tcp: Option<TcpMetrics>,
+    pub flight: Option<FlightReplayMetrics>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FlightReplayMetrics {
+    pub phase: String,
+    pub source: Option<String>,
+    pub trigger_kind: Option<String>,
+    pub trigger_reason: Option<String>,
+    pub losses: IncidentLosses,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -66,6 +77,7 @@ pub struct TemporalModel {
     activity: VecDeque<Activity>,
     rates: VecDeque<RateSample>,
     flows: HashMap<u64, f64>,
+    flight: Option<FlightReplayMetrics>,
 }
 
 impl TemporalModel {
@@ -76,11 +88,51 @@ impl TemporalModel {
             activity: VecDeque::with_capacity(MAX_ACTIVITY),
             rates: VecDeque::with_capacity(256),
             flows: HashMap::with_capacity(MAX_FLOWS),
+            flight: None,
         }
     }
 
     pub fn ingest(&mut self, event: NormalizedEvent, now: f64) {
         self.advance(now);
+        if event.category == METADATA_CATEGORY {
+            self.ingest_flight_metadata(&event);
+            return;
+        }
+        if let Some(phase) = event.labels.get(PHASE_LABEL) {
+            let flight = self.flight.get_or_insert_with(FlightReplayMetrics::default);
+            flight.phase = phase.chars().take(16).collect();
+            if let Some(source) = event.labels.get("source") {
+                flight.source = Some(source.chars().take(16).collect());
+            } else if event.category.starts_with("tcp.") {
+                flight.source = Some("tcp".to_owned());
+            } else if event.category.starts_with("sched.") {
+                flight.source = Some("scheduler".to_owned());
+            }
+            if event.category == TRIGGER_CATEGORY {
+                flight.trigger_kind = event
+                    .labels
+                    .get("trigger_kind")
+                    .map(|value| value.chars().take(96).collect());
+                flight.trigger_reason = event
+                    .labels
+                    .get("trigger_reason")
+                    .map(|value| value.chars().take(512).collect());
+            }
+        }
+        if event.category == TRIGGER_CATEGORY {
+            if self.activity.len() == MAX_ACTIVITY {
+                self.activity.pop_front();
+            }
+            self.activity.push_back(Activity {
+                born: self.now,
+                lane: stable_hash(b"synesthesia.flight.trigger"),
+                flow: stable_hash(b"synesthesia.flight.trigger"),
+                category: stable_hash(TRIGGER_CATEGORY.as_bytes()),
+                magnitude: 1.0,
+                direction: Direction::Neutral,
+            });
+            return;
+        }
         let flow = stable_hash(event.flow_key().as_bytes());
         let category = stable_hash(event.category.as_bytes());
         let event_count = event
@@ -127,6 +179,38 @@ impl TemporalModel {
         {
             self.flows.remove(&oldest);
             self.flows.insert(flow, self.now);
+        }
+    }
+
+    fn ingest_flight_metadata(&mut self, event: &NormalizedEvent) {
+        let flight = self.flight.get_or_insert_with(FlightReplayMetrics::default);
+        if let Some(source) = event.labels.get("source") {
+            flight.source = Some(source.chars().take(16).collect());
+        }
+        flight.phase = match event.labels.get("record").map(String::as_str) {
+            Some("start") => "pre".to_owned(),
+            Some("end") => "post".to_owned(),
+            _ => flight.phase.clone(),
+        };
+        if let Some(kind) = event.labels.get("trigger_kind") {
+            flight.trigger_kind = Some(kind.chars().take(96).collect());
+        }
+        if let Some(reason) = event.labels.get("trigger_reason") {
+            flight.trigger_reason = Some(reason.chars().take(512).collect());
+        }
+        if event
+            .labels
+            .get("record")
+            .is_some_and(|value| value == "end")
+        {
+            flight.losses = IncidentLosses {
+                kernel_ring: loss_label(event, "final_kernel_ring_loss"),
+                collector: loss_label(event, "final_collector_loss"),
+                ipc: loss_label(event, "final_ipc_loss"),
+                renderer_channel: loss_label(event, "final_renderer_channel_loss"),
+                malformed: loss_label(event, "final_malformed_count"),
+                writer: loss_label(event, "final_writer_loss"),
+            };
         }
     }
 
@@ -178,6 +262,7 @@ impl TemporalModel {
                 active_flows: self.flows.len(),
                 scheduler,
                 tcp,
+                flight: self.flight.clone(),
             },
         }
     }
@@ -250,6 +335,14 @@ impl TemporalModel {
             active_pathological_flows,
         })
     }
+}
+
+fn loss_label(event: &NormalizedEvent, name: &str) -> u64 {
+    event
+        .labels
+        .get(name)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
 }
 
 impl Default for TemporalModel {
@@ -378,5 +471,46 @@ mod tests {
         let snapshot = model.snapshot();
         assert!(snapshot.metrics.tcp.is_none());
         assert!(snapshot.activity.is_empty());
+    }
+
+    #[test]
+    fn flight_metadata_updates_phase_and_keeps_loss_boundaries_distinct() {
+        let event: NormalizedEvent = serde_json::from_str(
+            r#"{"v":1,"category":"synesthesia.flight.metadata","magnitude":0,"direction":"neutral","labels":{"record":"end","source":"tcp","trigger_kind":"tcp-reset","trigger_reason":"observed semantic tcp.reset.receive","final_kernel_ring_loss":"1","final_collector_loss":"2","final_ipc_loss":"3","final_renderer_channel_loss":"4","final_malformed_count":"5","final_writer_loss":"6"}}"#,
+        )
+        .unwrap();
+        let mut model = TemporalModel::default();
+        model.ingest(event, 1.0);
+        let snapshot = model.snapshot();
+        assert!(snapshot.activity.is_empty());
+        let flight = snapshot.metrics.flight.unwrap();
+        assert_eq!(flight.phase, "post");
+        assert_eq!(flight.source.as_deref(), Some("tcp"));
+        assert_eq!(
+            flight.losses,
+            IncidentLosses {
+                kernel_ring: 1,
+                collector: 2,
+                ipc: 3,
+                renderer_channel: 4,
+                malformed: 5,
+                writer: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn trigger_marker_is_visible_without_inventing_source_rate_or_flow() {
+        let event: NormalizedEvent = serde_json::from_str(
+            r#"{"v":1,"category":"synesthesia.flight.trigger","magnitude":1,"direction":"neutral","labels":{"synesthesia.flight.phase":"trigger","source":"tcp","trigger_kind":"manual","trigger_reason":"manual trigger requested"}}"#,
+        )
+        .unwrap();
+        let mut model = TemporalModel::default();
+        model.ingest(event, 1.0);
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.activity.len(), 1);
+        assert_eq!(snapshot.metrics.events_per_second, 0.0);
+        assert_eq!(snapshot.metrics.active_flows, 0);
+        assert!(snapshot.metrics.tcp.is_none());
     }
 }

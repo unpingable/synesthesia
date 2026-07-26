@@ -76,7 +76,7 @@ pub fn schema_document() -> Result<String> {
         "required": ["v", "category", "magnitude"],
         "properties": {
             "v": {"const": 1},
-            "timestamp": {"type": ["number", "null"], "description": "Unix seconds; fractions allowed"},
+            "timestamp": {"type": ["number", "null"], "description": "Source-defined seconds; fractions allowed. Producers must document their clock domain."},
             "category": {"type": "string"},
             "origin": {"type": ["string", "null"]},
             "target": {"type": ["string", "null"]},

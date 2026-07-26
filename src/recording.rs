@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 
 use crate::{
     event::NormalizedEvent,
+    flight_recorder::{FlightSource, METADATA_CATEGORY, parse_metadata_event},
     source::{EventSource, SourceStats, ndjson::NdjsonSource},
 };
 
@@ -43,6 +44,7 @@ pub struct ReplaySource {
     source: NdjsonSource<BufReader<File>>,
     previous_timestamp: Option<f64>,
     speed: f64,
+    flight_source: Option<FlightSource>,
 }
 
 impl ReplaySource {
@@ -53,13 +55,27 @@ impl ReplaySource {
             source: NdjsonSource::new(BufReader::new(file)),
             previous_timestamp: None,
             speed,
+            flight_source: None,
         })
     }
 
     pub fn next_timed(&mut self) -> Result<Option<(Duration, NormalizedEvent)>> {
-        let Some(event) = self.source.next_event()? else {
+        let Some(mut event) = self.source.next_event()? else {
             return Ok(None);
         };
+        if event.category == METADATA_CATEGORY {
+            let metadata = parse_metadata_event(&event)?;
+            self.flight_source = metadata.map(|metadata| metadata.source);
+            return Ok(Some((Duration::ZERO, event)));
+        }
+        if event.category == crate::flight_recorder::TRIGGER_CATEGORY {
+            if let Some(source) = self.flight_source {
+                event
+                    .labels
+                    .entry("source".to_owned())
+                    .or_insert_with(|| source.as_str().to_owned());
+            }
+        }
         let delay = replay_delay(self.previous_timestamp, event.timestamp, self.speed);
         if let Some(timestamp) = event.timestamp {
             self.previous_timestamp = Some(timestamp);
@@ -173,5 +189,113 @@ mod tests {
             ])
         );
         assert_eq!(total_delay, Duration::from_millis(3_525));
+    }
+
+    #[test]
+    fn flight_metadata_is_validated_skipped_and_trigger_is_exposed() {
+        for (fixture, source) in [
+            ("tcp-flight-incident.ndjson", "tcp"),
+            ("scheduler-flight-incident.ndjson", "scheduler"),
+        ] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(fixture);
+            let mut replay = ReplaySource::open(&path, 1.0).unwrap();
+            let mut categories = Vec::new();
+            let mut trigger = None;
+            while let Some((_, event)) = replay.next_timed().unwrap() {
+                if event.category == crate::flight_recorder::TRIGGER_CATEGORY {
+                    trigger = Some(event.labels.clone());
+                }
+                categories.push(event.category);
+            }
+            let trigger = trigger.expect("fixture trigger marker");
+            assert_eq!(trigger["source"], source);
+            assert_eq!(trigger[crate::flight_recorder::PHASE_LABEL], "trigger");
+            assert_eq!(
+                categories
+                    .iter()
+                    .filter(|category| category.as_str() == crate::flight_recorder::TRIGGER_CATEGORY)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                categories
+                    .iter()
+                    .filter(|category| category.as_str() == METADATA_CATEGORY)
+                    .count(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn replay_refuses_unsupported_flight_metadata() {
+        let path = temporary_path("flight-version");
+        fs::write(
+            &path,
+            "{\"v\":1,\"category\":\"synesthesia.flight.metadata\",\"magnitude\":0,\"direction\":\"neutral\",\"labels\":{\"format_version\":\"99\",\"record\":\"start\",\"source\":\"tcp\"}}\n",
+        )
+        .unwrap();
+        let mut replay = ReplaySource::open(&path, 1.0).unwrap();
+        let error = replay.next_timed().unwrap_err().to_string();
+        assert!(error.contains("unsupported flight metadata version 99"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn replay_refuses_truncated_flight_metadata_without_root() {
+        let path = temporary_path("flight-malformed");
+        fs::write(
+            &path,
+            "{\"v\":1,\"category\":\"synesthesia.flight.metadata\",\"magnitude\":0,\"direction\":\"neutral\",\"labels\":{\"format_version\":\"1\",\"record\":\"start\",\"source\":\"tcp\"}}\n",
+        )
+        .unwrap();
+        let mut replay = ReplaySource::open(&path, 1.0).unwrap();
+        let error = replay.next_timed().unwrap_err().to_string();
+        assert!(error.contains("missing configured_pre_trigger_seconds"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn orderly_partial_incident_remains_stream_recoverable() {
+        use crate::flight_recorder::{
+            FlightConfig, FlightRecorder, FlightSource, HostMetadata, IncidentLosses, TriggerInfo,
+            part_path,
+        };
+
+        let path = temporary_path("flight-partial");
+        let mut config = FlightConfig::new(path.clone(), FlightSource::Tcp);
+        config.pre_trigger = Duration::from_secs(1);
+        config.post_trigger = Duration::from_secs(5);
+        config.host = HostMetadata {
+            kernel: "test".to_owned(),
+            architecture: "test".to_owned(),
+        };
+        let mut flight = FlightRecorder::new(config).unwrap();
+        flight.arm(0.0).unwrap();
+        let event = DemoSource::new(9).next().unwrap();
+        flight
+            .observe(event, 0.1, IncidentLosses::default())
+            .unwrap();
+        flight
+            .trigger(
+                0.2,
+                Some(0.2),
+                TriggerInfo::manual(),
+                IncidentLosses::default(),
+            )
+            .unwrap();
+        drop(flight);
+
+        let partial = part_path(&path);
+        let mut replay = ReplaySource::open(&partial, 1.0).unwrap();
+        let mut categories = Vec::new();
+        while let Some((_, event)) = replay.next_timed().unwrap() {
+            categories.push(event.category);
+        }
+        assert!(categories.contains(&crate::flight_recorder::TRIGGER_CATEGORY.to_owned()));
+        assert!(!path.exists());
+        fs::remove_file(partial).unwrap();
     }
 }

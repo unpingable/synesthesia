@@ -1,6 +1,8 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+
+use crate::trigger::TriggerSpec;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -45,8 +47,10 @@ pub enum EbpfSource {
 #[derive(Debug, Args)]
 pub struct SchedulerArgs {
     /// Save normalized scheduler events as NDJSON.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "flight_recorder")]
     pub record: Option<PathBuf>,
+    #[command(flatten)]
+    pub flight: FlightArgs,
     #[command(flatten)]
     pub visual: VisualArgs,
 }
@@ -54,10 +58,28 @@ pub struct SchedulerArgs {
 #[derive(Debug, Args)]
 pub struct TcpArgs {
     /// Save normalized TCP pathology events as NDJSON.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "flight_recorder")]
     pub record: Option<PathBuf>,
     #[command(flatten)]
+    pub flight: FlightArgs,
+    #[command(flatten)]
     pub visual: VisualArgs,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct FlightArgs {
+    /// Retain bounded history and publish one triggered incident recording.
+    #[arg(long)]
+    pub flight_recorder: Option<PathBuf>,
+    /// Rolling history retained before the trigger (maximum 30s).
+    #[arg(long, default_value = "10s", value_parser = parse_duration)]
+    pub pre_trigger: Duration,
+    /// Tail captured after the trigger (maximum 30s).
+    #[arg(long, default_value = "5s", value_parser = parse_duration)]
+    pub post_trigger: Duration,
+    /// Typed source-specific semantic trigger (auto or manual by default).
+    #[arg(long, default_value = "auto")]
+    pub trigger: TriggerSpec,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -148,5 +170,76 @@ fn positive_f64(value: &str) -> Result<f64, String> {
         Ok(parsed)
     } else {
         Err("speed must be finite and greater than zero".to_owned())
+    }
+}
+
+fn parse_duration(value: &str) -> Result<Duration, String> {
+    let (number, multiplier) = if let Some(number) = value.strip_suffix("ms") {
+        (number, 0.001)
+    } else if let Some(number) = value.strip_suffix('s') {
+        (number, 1.0)
+    } else {
+        return Err("duration must end in ms or s (for example 250ms or 10s)".to_owned());
+    };
+    let seconds: f64 = number
+        .parse()
+        .map_err(|_| "duration must contain a number".to_owned())?;
+    let seconds = seconds * multiplier;
+    if seconds.is_finite() && seconds >= 0.0 {
+        Ok(Duration::from_secs_f64(seconds))
+    } else {
+        Err("duration must be finite and non-negative".to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_flight_options_parse_as_typed_bounded_values() {
+        let cli = Cli::try_parse_from([
+            "synesthesia",
+            "ebpf",
+            "tcp",
+            "--flight-recorder",
+            "incident.ndjson",
+            "--pre-trigger",
+            "2500ms",
+            "--post-trigger",
+            "5s",
+            "--trigger",
+            "tcp-retransmit-rate=120",
+        ])
+        .unwrap();
+        let Command::Ebpf(EbpfArgs {
+            source: EbpfSource::Tcp(args),
+        }) = cli.command
+        else {
+            panic!("expected TCP command");
+        };
+        assert_eq!(
+            args.flight.flight_recorder,
+            Some(PathBuf::from("incident.ndjson"))
+        );
+        assert_eq!(args.flight.pre_trigger, Duration::from_millis(2_500));
+        assert_eq!(args.flight.post_trigger, Duration::from_secs(5));
+        assert_eq!(args.flight.trigger, TriggerSpec::TcpRetransmitRate(120.0));
+    }
+
+    #[test]
+    fn ordinary_record_and_flight_recording_conflict() {
+        assert!(
+            Cli::try_parse_from([
+                "synesthesia",
+                "ebpf",
+                "scheduler",
+                "--record",
+                "ordinary.ndjson",
+                "--flight-recorder",
+                "incident.ndjson",
+            ])
+            .is_err()
+        );
     }
 }

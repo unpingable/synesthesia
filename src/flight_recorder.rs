@@ -242,6 +242,10 @@ impl FlightRecorder {
         self.state
     }
 
+    pub fn source(&self) -> FlightSource {
+        self.config.source
+    }
+
     pub fn arm(&mut self, now: f64) -> Result<(), FlightError> {
         self.require_state(FlightState::Disarmed, "arm")?;
         validate_now(now)?;
@@ -335,7 +339,9 @@ impl FlightRecorder {
                 return Err(error);
             }
         }
-        if let Err(error) = writer.write_trigger_marker(recorded_timestamp, &trigger) {
+        if let Err(error) =
+            writer.write_trigger_marker(recorded_timestamp, &trigger, self.config.source)
+        {
             self.state = FlightState::Failed;
             return Err(error);
         }
@@ -613,9 +619,11 @@ impl AtomicIncidentWriter {
         &mut self,
         timestamp: Option<f64>,
         trigger: &TriggerInfo,
+        source: FlightSource,
     ) -> Result<(), FlightError> {
         let mut labels = BTreeMap::from([
             (PHASE_LABEL.to_owned(), "trigger".to_owned()),
+            ("source".to_owned(), source.as_str().to_owned()),
             ("trigger_kind".to_owned(), trigger.kind.clone()),
             ("trigger_reason".to_owned(), trigger.reason.clone()),
         ]);
@@ -696,9 +704,14 @@ impl AtomicIncidentWriter {
                 source,
             })?;
         drop(writer);
-        fs::rename(&self.part, &self.output).map_err(|source| FlightError::Io {
-            action: "publish incident",
+        fs::hard_link(&self.part, &self.output).map_err(|source| FlightError::Io {
+            action: "atomically publish incident without overwriting",
             path: self.output.clone(),
+            source,
+        })?;
+        fs::remove_file(&self.part).map_err(|source| FlightError::Io {
+            action: "remove published partial incident link",
+            path: self.part.clone(),
             source,
         })
     }
@@ -741,11 +754,111 @@ pub fn parse_metadata_event(
         "tcp" => FlightSource::Tcp,
         _ => return Err(FlightError::MalformedMetadata("invalid source".to_owned())),
     };
+    for name in [
+        "configured_pre_trigger_seconds",
+        "configured_post_trigger_seconds",
+    ] {
+        require_finite_label(event, name)?;
+    }
+    if !event.labels.contains_key("event_timestamp_domain") {
+        label(event, "timestamp_domain")?;
+    }
+    if !event.labels.contains_key("recorder_clock_domain")
+        && !event.labels.contains_key("timestamp_domain")
+    {
+        return Err(FlightError::MalformedMetadata(
+            "missing recorder_clock_domain".to_owned(),
+        ));
+    }
+    for name in ["kernel", "architecture"] {
+        label(event, name)?;
+    }
+    let record = label(event, "record")?;
+    match record {
+        "start" => {
+            for name in ["armed_at", "trigger_at", "actual_pre_trigger_seconds"] {
+                require_finite_label(event, name)?;
+            }
+            for name in [
+                "pre_event_count",
+                "pre_encoded_bytes",
+                "pre_trigger_evictions",
+            ] {
+                require_u64_label(event, name)?;
+            }
+            validate_trigger_metadata(event)?;
+            validate_losses(event, "trigger")?;
+        }
+        "end" => {
+            for name in ["actual_pre_trigger_seconds", "actual_post_trigger_seconds"] {
+                require_finite_label(event, name)?;
+            }
+            for name in [
+                "pre_event_count",
+                "post_event_count",
+                "pre_trigger_evictions",
+            ] {
+                require_u64_label(event, name)?;
+            }
+            match label(event, "termination")? {
+                "normal" | "interrupted" | "collector-error" | "renderer-error" => {}
+                _ => {
+                    return Err(FlightError::MalformedMetadata(
+                        "invalid termination".to_owned(),
+                    ));
+                }
+            }
+            validate_trigger_metadata(event)?;
+            validate_losses(event, "final")?;
+        }
+        _ => {
+            return Err(FlightError::MalformedMetadata(
+                "record must be start or end".to_owned(),
+            ));
+        }
+    }
     Ok(Some(ParsedFlightMetadata {
-        record: label(event, "record")?.to_owned(),
+        record: record.to_owned(),
         source,
         format_version: version,
     }))
+}
+
+fn validate_trigger_metadata(event: &NormalizedEvent) -> Result<(), FlightError> {
+    label(event, "trigger_kind")?;
+    label(event, "trigger_reason")?;
+    if event.labels.contains_key("trigger_threshold") {
+        require_finite_label(event, "trigger_threshold")?;
+    }
+    Ok(())
+}
+
+fn validate_losses(event: &NormalizedEvent, prefix: &str) -> Result<(), FlightError> {
+    for suffix in [
+        "kernel_ring_loss",
+        "collector_loss",
+        "ipc_loss",
+        "renderer_channel_loss",
+        "malformed_count",
+        "writer_loss",
+    ] {
+        require_u64_label(event, &format!("{prefix}_{suffix}"))?;
+    }
+    Ok(())
+}
+
+fn require_finite_label(event: &NormalizedEvent, name: &str) -> Result<f64, FlightError> {
+    label(event, name)?
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(|| FlightError::MalformedMetadata(format!("invalid {name}")))
+}
+
+fn require_u64_label(event: &NormalizedEvent, name: &str) -> Result<u64, FlightError> {
+    label(event, name)?
+        .parse::<u64>()
+        .map_err(|_| FlightError::MalformedMetadata(format!("invalid {name}")))
 }
 
 fn label<'a>(event: &'a NormalizedEvent, key: &str) -> Result<&'a str, FlightError> {
@@ -785,7 +898,14 @@ fn base_metadata(config: &FlightConfig, record: &str) -> BTreeMap<String, String
             "configured_post_trigger_seconds".to_owned(),
             format_f64(config.post_trigger.as_secs_f64()),
         ),
-        ("timestamp_domain".to_owned(), "kernel-monotonic".to_owned()),
+        (
+            "event_timestamp_domain".to_owned(),
+            "kernel-monotonic".to_owned(),
+        ),
+        (
+            "recorder_clock_domain".to_owned(),
+            "process-monotonic-relative".to_owned(),
+        ),
         ("kernel".to_owned(), config.host.kernel.clone()),
         ("architecture".to_owned(), config.host.architecture.clone()),
     ])
@@ -984,7 +1104,26 @@ mod tests {
         assert!(status.retained_bytes <= 900);
         assert!(status.retained_duration <= 0.5);
         assert!(status.pre_trigger_evictions > 0);
-        recorder.cancel().unwrap();
+        recorder
+            .trigger(
+                0.8,
+                Some(0.8),
+                TriggerInfo::manual(),
+                IncidentLosses::default(),
+            )
+            .unwrap();
+        recorder.tick(1.8, IncidentLosses::default()).unwrap();
+        let final_record: NormalizedEvent =
+            serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap())
+                .unwrap();
+        assert_eq!(
+            final_record.labels["pre_trigger_evictions"],
+            status.pre_trigger_evictions.to_string()
+        );
+        assert_eq!(
+            final_record.labels["actual_pre_trigger_seconds"],
+            format_f64(status.retained_duration)
+        );
         cleanup(&path);
     }
 
@@ -1035,6 +1174,31 @@ mod tests {
     }
 
     #[test]
+    fn renderer_failure_after_trigger_publishes_an_honest_termination() {
+        let path = temporary_path("renderer-error");
+        let mut recorder = FlightRecorder::new(config(path.clone())).unwrap();
+        recorder.arm(0.0).unwrap();
+        recorder
+            .trigger(
+                0.2,
+                Some(0.2),
+                TriggerInfo::manual(),
+                IncidentLosses::default(),
+            )
+            .unwrap();
+        assert!(
+            recorder
+                .fail_after_trigger(0.3, IncidentLosses::default(), Termination::RendererError,)
+                .unwrap()
+        );
+        let final_record: NormalizedEvent =
+            serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap())
+                .unwrap();
+        assert_eq!(final_record.labels["termination"], "renderer-error");
+        cleanup(&path);
+    }
+
+    #[test]
     fn writer_failure_never_presents_a_final_incident() {
         let parent = temporary_path("missing-parent");
         let path = parent.join("incident.ndjson");
@@ -1055,15 +1219,48 @@ mod tests {
     }
 
     #[test]
+    fn final_publish_never_overwrites_a_path_created_after_trigger() {
+        let path = temporary_path("publish-race");
+        let mut recorder = FlightRecorder::new(config(path.clone())).unwrap();
+        recorder.arm(0.0).unwrap();
+        recorder
+            .observe(event(0), 0.1, IncidentLosses::default())
+            .unwrap();
+        recorder
+            .trigger(
+                0.2,
+                Some(0.2),
+                TriggerInfo::manual(),
+                IncidentLosses::default(),
+            )
+            .unwrap();
+        fs::write(&path, "do not overwrite\n").unwrap();
+        let error = recorder.tick(1.2, IncidentLosses::default()).unwrap_err();
+        assert!(error.to_string().contains("without overwriting"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "do not overwrite\n");
+        assert!(part_path(&path).exists());
+        cleanup(&path);
+    }
+
+    #[test]
     fn metadata_version_is_explicit_and_refused_when_unknown() {
-        let mut event = metadata_event(
-            Some(1.0),
-            BTreeMap::from([
-                ("format_version".to_owned(), "1".to_owned()),
-                ("record".to_owned(), "start".to_owned()),
-                ("source".to_owned(), "tcp".to_owned()),
-            ]),
-        );
+        let metadata_config = config(temporary_path("metadata"));
+        let mut labels = base_metadata(&metadata_config, "start");
+        labels.extend([
+            ("armed_at".to_owned(), "0".to_owned()),
+            ("trigger_at".to_owned(), "1".to_owned()),
+            ("trigger_kind".to_owned(), "manual".to_owned()),
+            (
+                "trigger_reason".to_owned(),
+                "manual trigger requested".to_owned(),
+            ),
+            ("actual_pre_trigger_seconds".to_owned(), "1".to_owned()),
+            ("pre_event_count".to_owned(), "2".to_owned()),
+            ("pre_encoded_bytes".to_owned(), "100".to_owned()),
+            ("pre_trigger_evictions".to_owned(), "0".to_owned()),
+        ]);
+        insert_losses(&mut labels, "trigger", IncidentLosses::default());
+        let mut event = metadata_event(Some(1.0), labels);
         assert_eq!(
             parse_metadata_event(&event)
                 .unwrap()
@@ -1071,6 +1268,12 @@ mod tests {
                 .format_version,
             1
         );
+        event.labels.remove("event_timestamp_domain");
+        event.labels.remove("recorder_clock_domain");
+        event
+            .labels
+            .insert("timestamp_domain".to_owned(), "kernel-monotonic".to_owned());
+        assert!(parse_metadata_event(&event).unwrap().is_some());
         event
             .labels
             .insert("format_version".to_owned(), "9".to_owned());

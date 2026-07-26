@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
 use crate::{
@@ -17,7 +17,10 @@ use crate::{
     model::TemporalModel,
     recording::{Recorder, ReplaySource},
     render::GridWidget,
-    source::{EventSource, demo::DemoSource, lines::LineSource, ndjson::NdjsonSource},
+    source::{
+        EventSource, demo::DemoSource, lines::LineSource, ndjson::NdjsonSource,
+        tshark::TsharkTsvSource,
+    },
     terminal::TerminalSession,
     view::{ViewOptions, compose},
 };
@@ -52,9 +55,6 @@ pub fn run_demo(args: DemoArgs) -> Result<()> {
 }
 
 pub fn run_stdin(args: StdinArgs) -> Result<()> {
-    if args.format == InputFormat::TsharkTsv {
-        bail!("tshark-tsv arrives in Stage 4");
-    }
     if args.visual.snapshot || !io::stdout().is_terminal() {
         return snapshot_stdin(args);
     }
@@ -89,7 +89,7 @@ fn snapshot_stdin(args: StdinArgs) -> Result<()> {
     let mut source: Box<dyn EventSource> = match args.format {
         InputFormat::Lines => Box::new(LineSource::new(BufReader::new(stdin.lock()))),
         InputFormat::Ndjson => Box::new(NdjsonSource::new(BufReader::new(stdin.lock()))),
-        InputFormat::TsharkTsv => bail!("tshark-tsv arrives in Stage 4"),
+        InputFormat::TsharkTsv => Box::new(TsharkTsvSource::new(BufReader::new(stdin.lock()))),
     };
     let mut recorder = args.record.as_deref().map(Recorder::create).transpose()?;
     let mut model = TemporalModel::default();
@@ -274,7 +274,9 @@ fn spawn_producer(producer: Producer, ingress: Ingress, stats: Arc<ProducerStats
             let mut source: Box<dyn EventSource> = match format {
                 InputFormat::Lines => Box::new(LineSource::new(BufReader::new(stdin.lock()))),
                 InputFormat::Ndjson => Box::new(NdjsonSource::new(BufReader::new(stdin.lock()))),
-                InputFormat::TsharkTsv => return,
+                InputFormat::TsharkTsv => {
+                    Box::new(TsharkTsvSource::new(BufReader::new(stdin.lock())))
+                }
             };
             let mut recorder = record
                 .as_deref()

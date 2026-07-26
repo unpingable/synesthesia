@@ -1,0 +1,134 @@
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Write},
+    path::Path,
+    time::Duration,
+};
+
+use anyhow::{Context, Result};
+
+use crate::{
+    event::NormalizedEvent,
+    source::{EventSource, SourceStats, ndjson::NdjsonSource},
+};
+
+pub const UNTIMED_FALLBACK: Duration = Duration::from_millis(50);
+
+pub struct Recorder {
+    writer: BufWriter<File>,
+}
+
+impl Recorder {
+    pub fn create(path: &Path) -> Result<Self> {
+        let file = File::create(path)
+            .with_context(|| format!("could not create recording {}", path.display()))?;
+        Ok(Self {
+            writer: BufWriter::new(file),
+        })
+    }
+
+    pub fn record(&mut self, event: &NormalizedEvent) -> Result<()> {
+        serde_json::to_writer(&mut self.writer, event)?;
+        self.writer.write_all(b"\n")?;
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<()> {
+        self.writer.flush()?;
+        Ok(())
+    }
+}
+
+pub struct ReplaySource {
+    source: NdjsonSource<BufReader<File>>,
+    previous_timestamp: Option<f64>,
+    speed: f64,
+}
+
+impl ReplaySource {
+    pub fn open(path: &Path, speed: f64) -> Result<Self> {
+        let file = File::open(path)
+            .with_context(|| format!("could not open replay {}", path.display()))?;
+        Ok(Self {
+            source: NdjsonSource::new(BufReader::new(file)),
+            previous_timestamp: None,
+            speed,
+        })
+    }
+
+    pub fn next_timed(&mut self) -> Result<Option<(Duration, NormalizedEvent)>> {
+        let Some(event) = self.source.next_event()? else {
+            return Ok(None);
+        };
+        let delay = replay_delay(self.previous_timestamp, event.timestamp, self.speed);
+        if let Some(timestamp) = event.timestamp {
+            self.previous_timestamp = Some(timestamp);
+        }
+        Ok(Some((delay, event)))
+    }
+
+    pub fn stats(&self) -> SourceStats {
+        self.source.stats()
+    }
+}
+
+pub fn replay_delay(previous: Option<f64>, current: Option<f64>, speed: f64) -> Duration {
+    match (previous, current) {
+        (Some(previous), Some(current)) if current >= previous => {
+            Duration::from_secs_f64(((current - previous) / speed).min(60.0))
+        }
+        _ => UNTIMED_FALLBACK.div_f64(speed),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use crate::source::demo::DemoSource;
+
+    use super::*;
+
+    fn temporary_path(label: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("synesthesia-{label}-{unique}.ndjson"))
+    }
+
+    #[test]
+    fn record_replay_round_trip_preserves_events() {
+        let path = temporary_path("roundtrip");
+        let expected: Vec<_> = DemoSource::new(9).take(12).collect();
+        let mut recorder = Recorder::create(&path).unwrap();
+        for event in &expected {
+            recorder.record(event).unwrap();
+        }
+        recorder.finish().unwrap();
+
+        let mut replay = ReplaySource::open(&path, 1.0).unwrap();
+        let mut actual = Vec::new();
+        while let Some((_, event)) = replay.next_timed().unwrap() {
+            actual.push(event);
+        }
+        fs::remove_file(path).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn replay_timing_respects_speed_and_fallback() {
+        assert_eq!(
+            replay_delay(Some(10.0), Some(10.5), 2.0),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            replay_delay(Some(10.0), Some(10.5), 0.5),
+            Duration::from_secs(1)
+        );
+        assert_eq!(replay_delay(None, None, 2.0), Duration::from_millis(25));
+    }
+}

@@ -49,7 +49,7 @@ impl Iterator for DemoSource {
         labels.insert("seed".to_owned(), self.seed.to_string());
         Some(NormalizedEvent {
             v: SCHEMA_VERSION,
-            timestamp: Some(index as f64 * 0.045),
+            timestamp: Some((index * 45) as f64 / 1_000.0),
             category: categories[category_index].to_owned(),
             origin: Some(format!("node-{:02}", pair)),
             target: Some(format!("node-{:02}", (pair * 7 + phase) % 13)),

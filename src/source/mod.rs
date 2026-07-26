@@ -7,6 +7,7 @@ use crate::event::NormalizedEvent;
 pub mod demo;
 pub mod lines;
 pub mod ndjson;
+pub mod procfs;
 pub mod scheduler;
 pub mod scheduler_helper;
 pub mod scheduler_ipc;

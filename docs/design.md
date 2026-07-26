@@ -106,3 +106,78 @@ short burst workers, and settling. The states were appreciably different, but
 concurrent Lean and Rust builds were also active, so this is a qualitative
 instrument check rather than a controlled scheduler benchmark. The recorded
 session reported zero kernel, collector, and renderer-channel losses.
+
+## Experimental TCP-pathology source
+
+The TCP source reuses the scheduler campaign's separate-helper shape without
+creating a public probe framework:
+
+```text
+three TCP tracepoints -> 1 MiB eBPF ring
+                      -> synesthesia-tcp-collector
+                      -> 33 ms bounded flow/kind aggregation
+                      -> 96-byte SYNT pulse
+                      -> bounded renderer channel
+                      -> TemporalModel -> weather | waterfall
+```
+
+The checked-in C sensor uses the host BTF layouts
+`trace_event_raw_tcp_event_sk_skb` for `tcp_retransmit_skb` and
+`tcp_send_reset`, and `trace_event_raw_tcp_event_sk` for
+`tcp_receive_reset`. The fields used are the tracepoint header's address
+family, source/destination addresses, host-order source/destination ports,
+socket state where present, plus a monotonic timestamp and current CPU. The
+tracepoint classes do not expose a safe byte-length field, so the sensor does
+not dereference the skb merely to synthesize retransmitted-byte metrics.
+
+Each raw kernel record is exactly 56 bytes. It contains a version, kind,
+family, CPU, ports, socket state, and two fixed 16-byte address slots. It
+contains no payload, process data, stack, socket content, or application
+metadata. The collector strictly rejects wrong sizes, unsupported versions,
+kinds, and families.
+
+The collector coalesces equal `(kind, family, endpoint pair)` keys for 33 ms.
+There are at most 1,024 buckets in a window and at most 4,096 raw records are
+drained per poll. A new key at the bucket ceiling is deterministically refused
+and counted as collector loss; existing keys continue accumulating. The map is
+discarded every window, so it cannot become a permanent flow table. The pipe
+uses a distinct `SYNT` magic and fixed 96-byte versioned record, preventing
+scheduler/TCP protocol confusion.
+
+Kernel ring reservation/read loss, collector bucket refusal, IPC loss, and
+renderer-channel drop counters remain separate. The current pipe is blocking
+and bounded: an output failure terminates the helper rather than silently
+drops a pulse, so its IPC-loss counter remains zero in normal operation.
+Renderer overload still uses the existing non-blocking 2,048-event channel.
+
+Normalization maps local retransmits to `tcp.retransmit` and outbound flow,
+sent resets to `tcp.reset.send` and outbound impact, and received resets to
+`tcp.reset.receive` with peer-to-local inbound direction. Endpoint pairs are
+canonicalized only for stable lane identity; origin/target direction remains
+truthful. Magnitude is a bounded function of aggregate count because the
+selected tracepoint ABI does not provide retransmitted byte length.
+
+The view recognizes those three semantic categories without changing global
+gain or decay. Retransmits draw deterministic jagged fractures through the
+stable flow region. Sent resets make an outward horizontal `X` cut; received
+resets make an inward vertical `!` impact. ANSI substitutes coherent Unicode
+strokes, while ASCII remains printable and escape-free. Repetition on one
+flow therefore accumulates localized turbulence under the same fixed temporal
+physics.
+
+Qualification uses `examples/tcp-pathology-lab.sh`: two temporary network
+namespaces, one veth pair, documentation-range IPv4 addresses, bounded
+`iperf3` transfers, and loss applied only to the private client veth with
+`tc netem`. A closed port generates a contained reset. An exit trap removes
+the namespaces and therefore their veths and qdisc; no host route or primary
+interface is changed.
+
+Live qualification on Linux `6.8.0-136-generic` x86_64 used explicit root
+privilege and all three tracepoints attached. The contained quiet and healthy
+phases emitted no lab-flow pathology. The 1% loss phase produced 5,010 raw
+retransmits on one stable flow; the 8% phase produced 822 on a second flow
+(fewer events under stronger TCP backoff, not evidence of less impairment).
+The closed-port phase produced a received-reset impact, and the following
+10-second settle emitted no lab-flow pathology. In total, 5,835 raw lab events
+became 116 semantic pulses; the largest 33 ms bucket contained 141 events.
+The namespace and veth cleanup check was empty and no lab process remained.

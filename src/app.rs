@@ -24,7 +24,7 @@ use crate::{
         EventSource, demo::DemoSource, lines::LineSource, ndjson::NdjsonSource,
         tshark::TsharkTsvSource,
     },
-    terminal::TerminalSession,
+    terminal::{TerminalSession, TerminationFlag},
     view::{ViewOptions, compose},
 };
 
@@ -144,9 +144,13 @@ fn snapshot_tcp(mut helper: crate::source::tcp_helper::TcpHelper, args: TcpArgs)
     let mut model = TemporalModel::default();
     let started = Instant::now();
     let deadline = started + Duration::from_millis(750);
+    let mut losses = SnapshotLosses::default();
     while Instant::now() < deadline {
         match helper.next_pulse() {
             Ok(Some(pulse)) => {
+                losses.kernel = pulse.kernel_ring_drops;
+                losses.collector = pulse.collector_drops;
+                losses.ipc = pulse.ipc_drops;
                 if let Some(event) = pulse.into_normalized() {
                     if let Some(recorder) = &mut recorder {
                         recorder.record(&event)?;
@@ -161,7 +165,7 @@ fn snapshot_tcp(mut helper: crate::source::tcp_helper::TcpHelper, args: TcpArgs)
     if let Some(recorder) = recorder {
         recorder.finish()?;
     }
-    print_snapshot(&model, &args.visual, 0)
+    print_snapshot(&model, &args.visual, 0, losses)
 }
 
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
@@ -173,9 +177,12 @@ fn snapshot_scheduler(
     let mut model = TemporalModel::default();
     let started = Instant::now();
     let deadline = started + Duration::from_millis(750);
+    let mut losses = SnapshotLosses::default();
     while Instant::now() < deadline {
         match helper.next_pulse() {
             Ok(Some(pulse)) => {
+                losses.kernel = pulse.kernel_ring_drops;
+                losses.collector = pulse.collector_drops;
                 if let Some(event) = pulse.into_normalized() {
                     if let Some(recorder) = &mut recorder {
                         recorder.record(&event)?;
@@ -190,7 +197,7 @@ fn snapshot_scheduler(
     if let Some(recorder) = recorder {
         recorder.finish()?;
     }
-    print_snapshot(&model, &args.visual, 0)
+    print_snapshot(&model, &args.visual, 0, losses)
 }
 
 fn snapshot_demo(args: &DemoArgs) -> Result<()> {
@@ -198,7 +205,7 @@ fn snapshot_demo(args: &DemoArgs) -> Result<()> {
     for (index, event) in DemoSource::new(args.seed).take(260).enumerate() {
         model.ingest(event, index as f64 * 0.035);
     }
-    print_snapshot(&model, &args.visual, 0)
+    print_snapshot(&model, &args.visual, 0, SnapshotLosses::default())
 }
 
 fn snapshot_stdin(args: StdinArgs) -> Result<()> {
@@ -221,7 +228,12 @@ fn snapshot_stdin(args: StdinArgs) -> Result<()> {
     if let Some(recorder) = recorder {
         recorder.finish()?;
     }
-    print_snapshot(&model, &args.visual, source.stats().malformed)
+    print_snapshot(
+        &model,
+        &args.visual,
+        source.stats().malformed,
+        SnapshotLosses::default(),
+    )
 }
 
 fn snapshot_replay(args: ReplayArgs) -> Result<()> {
@@ -232,10 +244,27 @@ fn snapshot_replay(args: ReplayArgs) -> Result<()> {
         now += delay.as_secs_f64();
         model.ingest(event, now);
     }
-    print_snapshot(&model, &args.visual, replay.stats().malformed)
+    print_snapshot(
+        &model,
+        &args.visual,
+        replay.stats().malformed,
+        SnapshotLosses::default(),
+    )
 }
 
-fn print_snapshot(model: &TemporalModel, visual: &VisualArgs, malformed: u64) -> Result<()> {
+#[derive(Clone, Copy, Debug, Default)]
+struct SnapshotLosses {
+    kernel: u64,
+    collector: u64,
+    ipc: u64,
+}
+
+fn print_snapshot(
+    model: &TemporalModel,
+    visual: &VisualArgs,
+    malformed: u64,
+    losses: SnapshotLosses,
+) -> Result<()> {
     let options = ViewOptions {
         mode: visual.mode,
         view: visual.view,
@@ -243,9 +272,9 @@ fn print_snapshot(model: &TemporalModel, visual: &VisualArgs, malformed: u64) ->
         paused: false,
         malformed,
         dropped: 0,
-        kernel_dropped: 0,
-        collector_dropped: 0,
-        ipc_dropped: 0,
+        kernel_dropped: losses.kernel,
+        collector_dropped: losses.collector,
+        ipc_dropped: losses.ipc,
         help: false,
     };
     let frame = compose(&model.snapshot(), visual.width, visual.height, &options);
@@ -254,6 +283,7 @@ fn print_snapshot(model: &TemporalModel, visual: &VisualArgs, malformed: u64) ->
 }
 
 fn run_interactive(producer: Producer, visual: VisualArgs) -> Result<()> {
+    let termination = TerminationFlag::register()?;
     let (ingress, buffer) = event_buffer(CHANNEL_CAPACITY);
     let producer_stats = Arc::new(ProducerStats::default());
     let _producer_guard = spawn_producer(producer, ingress, Arc::clone(&producer_stats));
@@ -279,6 +309,9 @@ fn run_interactive(producer: Producer, visual: VisualArgs) -> Result<()> {
     let mut drained = Vec::with_capacity(MAX_DRAIN_PER_FRAME);
 
     loop {
+        if termination.requested() {
+            break;
+        }
         let frame_started = Instant::now();
         let now = started.elapsed().as_secs_f64();
         if !state.paused {

@@ -95,6 +95,52 @@ supports x86_64 only. A successful tracepoint event is evidence that the event
 occurred; it is not proof of complete scheduler causality, task runtime, CPU
 utilization, or why the scheduler made a decision.
 
+## Experimental Linux TCP-pathology source
+
+Retransmits are lightning. Resets are impact events.
+
+```sh
+cargo build --release --features ebpf --bins
+sudo ./target/release/synesthesia ebpf tcp
+```
+
+The Linux-only helper attaches to `tcp_retransmit_skb`, `tcp_send_reset`, and
+`tcp_receive_reset`. It reads endpoint identity, address family, ports, socket
+state, CPU, and event time from those tracepoints. It never reads packet
+payloads, socket contents, command lines, TLS metadata, or application
+protocols. Synesthesia does not invoke `sudo`; privilege must be supplied
+explicitly by the user.
+
+A retransmit means the local TCP stack retransmitted data. It does not prove
+packet loss, congestion, a remote fault, or why retransmission was necessary.
+A reset tracepoint proves that the local stack sent or received a reset; it
+does not assign blame to an application or peer.
+
+Raw events are aggregated into bounded 33 ms flow/kind windows inside the
+collector, then cross into the renderer as a fixed binary pulse stream. NDJSON
+is reserved for recording, replay, fixtures, and interoperability:
+
+```sh
+sudo ./target/release/synesthesia ebpf tcp --record tcp-session.ndjson
+./target/release/synesthesia replay tcp-session.ndjson
+./target/release/synesthesia replay tests/fixtures/tcp-pathology.ndjson --speed 0.25
+```
+
+To generate controlled local retransmits and resets without touching the
+host's primary interfaces or routes, run the contained namespace lab in a
+second terminal:
+
+```sh
+sudo ./examples/tcp-pathology-lab.sh
+```
+
+The lab uses two temporary namespaces, a veth pair, documentation-only
+addresses, bounded `iperf3` transfers, and `tc netem`; its exit trap removes
+the namespaces, veths, qdisc, and child process. Current limitations are
+x86_64, readable kernel BTF, ring-buffer support, all three named tracepoints,
+and externally granted BPF/perf-event privilege. Live qualification used Linux
+6.8 on x86_64, Clang 18, bpftool 7.4, Aya 0.13.1, and explicit `sudo`.
+
 ## Inputs, recordings, and replay
 
 ```sh
@@ -145,6 +191,7 @@ snapshots contain printable ASCII and newlines only.
 - not a browser dashboard
 - not a replacement for Wireshark
 - not a scheduler profiler or complete causality model
+- not a TCP connection tracker, packet capture, or diagnosis of retransmit cause
 - not yet a stable wire protocol beyond the documented v1 behavior
 
 See [the design notes](docs/design.md) for boundaries and bounded-memory

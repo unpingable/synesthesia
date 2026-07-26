@@ -8,6 +8,12 @@
   scheduler activity before fixed binary pulses cross into the renderer.
 - Add stable CPU weather lanes, scheduler-specific rates and loss accounting,
   normalized recording, unprivileged replay, and a sanitized scheduler fixture.
+- Add an experimental x86_64 Linux TCP-pathology source for retransmit, sent
+  reset, and received reset tracepoints.
+- Add a separate bounded TCP collector with 33 ms flow/kind aggregation,
+  versioned fixed binary pulses, and four-boundary loss accounting.
+- Add stable-flow retransmit lightning, directional reset impacts, compact TCP
+  rates, sanitized unprivileged replay, and a contained namespace/netem lab.
 
 ## 0.1.0 - 2026-07-26
 

@@ -59,6 +59,7 @@ human direction and live qualification:
 - `d795617` — add scheduler event source boundary
 - `16f291f` — add live ebpf scheduler capture
 - `a9ac4c9` — tune scheduler terminal weather
+- `dd2bd99` — harden experimental scheduler source
 
 The implementation uses a checked-in, original C tracepoint sensor and an
 AI-assisted Rust collector/renderer integration. It does not copy Cava,
@@ -70,6 +71,29 @@ type-name mismatch for the wakeup tracepoint. All four scheduler tracepoints
 then attached successfully and produced a real ASCII snapshot. The checked-in
 `examples/scheduler.ndjson` fixture is synthetic and sanitized; it does not
 contain host process names, usernames, or unrelated machine activity.
+
+### Experimental TCP-pathology campaign
+
+Lead collaboration: OpenAI Codex.
+
+A later local research campaign added one narrow Linux TCP-pathology source
+under human direction and live qualification:
+
+- `417a7cd` — add tcp pathology event source boundary
+- `1a022c4` — add live ebpf tcp pathology capture
+- `1a70ac7` — tune tcp pathology terminal weather
+
+The original checked-in C tracepoint sensor and Rust helper integration use
+Aya as an ordinary third-party dependency. They do not copy Wireshark,
+libbpf-tools, bpftrace, Aya examples, or other TCP tracing implementations.
+The selected tracepoint layouts were derived from the qualification host's
+Linux headers and BTF rather than assumed from memory.
+
+All three selected tracepoints attached successfully on the development host:
+`tcp_retransmit_skb`, `tcp_send_reset`, and `tcp_receive_reset`. The
+checked-in raw TSV and normalized NDJSON fixtures are synthetic and sanitized,
+using only documentation-range addresses. They contain no captured host
+addresses, payloads, process data, usernames, or application metadata.
 
 ## Provenance basis and limits
 

@@ -48,7 +48,7 @@ repository ships an application binary.
 
 ```text
 src/                 Rust source: CLI, sources, model, views, renderers
-bpf/                 Minimal checked-in Linux scheduler tracepoint sensor
+bpf/                 Minimal checked-in Linux tracepoint sensors
 tests/fixtures/      Exact external-format parser fixtures
 examples/            NDJSON samples, replay fixture, VHS recording recipe
 docs/design.md       Architecture, bounds, and temporal/rendering model
@@ -75,10 +75,10 @@ docs/demo.gif        Real generated terminal recording
 5. Visual quality is a product requirement, not optional polish.
 6. ASCII snapshots contain printable ASCII and newlines only, with no escape
    sequences.
-7. Live scheduler capture stays in the separate Linux helper. Normalize and
-   aggregate before fixed binary pulses cross into the renderer; NDJSON is for
+7. Live eBPF capture stays in separate Linux helpers. Normalize and aggregate
+   before fixed binary pulses cross into the renderer; NDJSON is for
    interoperability, recording, fixtures, and replay, not the tracepoint hot
-   path.
+   path. Keep the scheduler and TCP wire protocols explicitly distinct.
 8. eBPF links and maps are ephemeral. Never pin objects, escalate privilege,
    change kernel policy, or invoke `sudo` from Synesthesia.
 

@@ -1,6 +1,10 @@
 use std::{
     io::{self, Stdout},
     panic,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::Result;
@@ -10,9 +14,49 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+use signal_hook::{
+    SigId,
+    consts::signal::{SIGINT, SIGTERM},
+    low_level::unregister,
+};
 
 pub type LiveTerminal = Terminal<CrosstermBackend<Stdout>>;
 type PanicHook = Box<dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+pub struct TerminationFlag {
+    requested: Arc<AtomicBool>,
+    registrations: [SigId; 2],
+}
+
+impl TerminationFlag {
+    pub fn register() -> Result<Self> {
+        let requested = Arc::new(AtomicBool::new(false));
+        let interrupt = signal_hook::flag::register(SIGINT, Arc::clone(&requested))?;
+        let terminate = match signal_hook::flag::register(SIGTERM, Arc::clone(&requested)) {
+            Ok(registration) => registration,
+            Err(error) => {
+                unregister(interrupt);
+                return Err(error.into());
+            }
+        };
+        Ok(Self {
+            requested,
+            registrations: [interrupt, terminate],
+        })
+    }
+
+    pub fn requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for TerminationFlag {
+    fn drop(&mut self) {
+        for registration in self.registrations {
+            unregister(registration);
+        }
+    }
+}
 
 pub struct TerminalSession {
     terminal: LiveTerminal,

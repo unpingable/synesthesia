@@ -27,13 +27,14 @@ Network and generic-input modes do not require capture privileges and do not
 perform packet capture. External producers such as `tshark` may require
 elevated privileges depending on the host.
 
-The experimental scheduler source is different: its separate Linux collector
-must load BPF programs and attach perf-event tracepoints. Synesthesia never
-invokes `sudo`, changes sysctls, mounts tracefs, weakens lockdown or
-unprivileged-BPF policy, installs capabilities, or creates setuid programs.
-Users explicitly choose the credentials or capabilities supplied to the
-launcher and helper. Running `sudo synesthesia ebpf scheduler` also runs the
-launcher with those credentials; the process boundary is not a privilege-drop
+The experimental scheduler and TCP-pathology sources are different: their
+separate Linux collectors must load BPF programs and attach perf-event
+tracepoints. Synesthesia never invokes `sudo`, changes sysctls, mounts
+tracefs, weakens lockdown or unprivileged-BPF policy, installs capabilities,
+creates setuid programs, or configures network namespaces and qdiscs. Users
+explicitly choose the credentials or capabilities supplied to the launcher
+and helper. Running either eBPF command through `sudo` also runs the launcher
+with those credentials; the process boundary is not a privilege-drop
 mechanism.
 
 The collector reads scheduler tracepoint fields limited to timestamps, CPU
@@ -42,6 +43,18 @@ arguments, paths, environments, stack traces, or payloads. Reports involving
 malformed helper records, verifier/error misclassification, ring-buffer or
 pipe exhaustion, lingering attachments, or privilege-boundary mistakes are
 particularly relevant.
+
+The TCP collector reads only tracepoint-provided endpoint addresses, ports,
+address family, socket state, CPU, kind, and time. It does not read payloads,
+socket contents, process arguments, TLS metadata, or application protocols.
+Endpoint addresses in a live recording may still be sensitive operational
+data; inspect recordings before sharing them.
+
+`examples/tcp-pathology-lab.sh` is an explicit root-operated qualification
+tool, not code invoked by Synesthesia. It creates two temporary network
+namespaces and a private veth/qdisc, refuses non-root execution, never changes
+a host interface or route, and removes its resources through an exit trap.
+Review shell scripts before executing them with privilege.
 
 ## Supported versions
 

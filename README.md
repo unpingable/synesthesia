@@ -199,6 +199,19 @@ utilization, or why the scheduler made a decision.
 
 Retransmits are lightning. Resets are impact events.
 
+![Real rendering of a sanitized TCP kernel recording](docs/tcp-kernel-weather.gif)
+
+This is a real Synesthesia rendering of a sanitized replay—not a live GIF.
+The source events were captured from the existing eBPF TCP collector during
+the controlled namespace/netem lab, then restricted to documentation-only
+`192.0.2.0/24` flows. Relative timing, category, magnitude, and direction are
+preserved; unrelated host traffic was excluded. The replay shows retransmit
+buildup, reset impacts, a quiet gap, a second affected flow, and settle.
+
+The exact input and VHS recipe are
+[tcp-kernel-weather.ndjson](examples/tcp-kernel-weather.ndjson) and
+[tcp-kernel-weather.tape](examples/tcp-kernel-weather.tape).
+
 ```sh
 cargo build --release --features ebpf --bins
 sudo ./target/release/synesthesia ebpf tcp

@@ -347,3 +347,9 @@ behavior.
 The local feature, regression, and reproducibility evidence for the first
 binary release is recorded in
 [v0.2.0-qualification.md](v0.2.0-qualification.md).
+
+The experimental TCP GIF is renderer evidence, not a fabricated screenshot or
+a live-capture claim. Its checked-in NDJSON is a selected, timestamp-rebased
+excerpt from the controlled live namespace/netem capture, restricted to
+documentation-only endpoints. VHS then records the ordinary unprivileged
+replay path.

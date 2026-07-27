@@ -149,6 +149,24 @@ own license, notice, README, and release notes. Packaging uses standard Cargo,
 GNU tar, gzip, and SHA-256 tools and adds no third-party runtime service or
 installer.
 
+### Diagnostics and distribution-polish campaign
+
+Lead collaboration: OpenAI Codex.
+
+A later human-directed campaign added the read-only doctor, Clap-derived shell
+completions and man page, and one experimental kernel-weather recording.
+`docs/tcp-kernel-weather.gif` is a real VHS recording of Synesthesia replaying
+a sanitized excerpt from the prior live controlled TCP namespace/netem
+capture. It is not presented as live capture.
+
+The excerpt retains actual relative timing, pathology category, magnitude, and
+direction for selected semantic pulses. It contains only the lab's
+documentation-range `192.0.2.0/24` endpoints; unrelated host traffic was
+excluded, timestamps were rebased, and no synthetic pathology was inserted.
+The source excerpt and reproducible tape are checked in beside the other
+examples. The GIF contains no terminal prompt, hostname, username, home path,
+shell history, or real endpoint.
+
 ## Provenance basis and limits
 
 This document is a functional attribution record based on commit history,

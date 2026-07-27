@@ -25,19 +25,21 @@ nc -lk 9000 | cargo run --release -- stdin --format lines
 
 ## Download
 
-The v0.2.0 release is one x86_64 Linux glibc archive:
+The v0.2.1 release is one x86_64 Linux glibc archive:
 
 ```sh
-sha256sum -c synesthesia-v0.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf synesthesia-v0.2.0-x86_64-unknown-linux-gnu.tar.gz
-./synesthesia demo
+sha256sum -c synesthesia-v0.2.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf synesthesia-v0.2.1-x86_64-unknown-linux-gnu.tar.gz
+cd synesthesia-v0.2.1-x86_64-unknown-linux-gnu
+./bin/synesthesia demo
 ```
 
 Download the archive and its SHA-256 checksum from the
-[v0.2.0 release](https://github.com/unpingable/synesthesia/releases/tag/v0.2.0).
+[v0.2.1 release](https://github.com/unpingable/synesthesia/releases/tag/v0.2.1).
 The archive also contains the two experimental eBPF collector helpers beside
-the launcher. It does not install them, grant capabilities, or set setuid
-bits.
+the launcher under `bin/`, plus generated Bash/Zsh/Fish completions, the
+`synesthesia(1)` man page, and the sanitized kernel-weather GIF under `share/`.
+It does not install them, grant capabilities, or set setuid bits.
 
 To build from source instead:
 

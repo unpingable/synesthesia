@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.2.1 - 2026-07-26
+
+- Add a read-only `doctor` with schema-v1 JSON, conservative terminal/procfs/
+  eBPF readiness, explicit active attach checks, and public-safe output.
+- Add deterministic Bash, Zsh, and Fish completions plus a Clap-derived
+  `synesthesia(1)` man page.
+- Add a real rendering of a sanitized replay excerpt from the controlled live
+  TCP eBPF capture, with its source pulses and VHS recipe.
+- Ship generated documentation, completions, and the kernel-weather GIF in a
+  reproducible versioned `bin/` and `share/` archive layout.
+
 ## 0.2.0 - 2026-07-26
 
 - Add a bounded event-driven particle layer with deterministic direction,

@@ -67,9 +67,9 @@ with stable opaque identities for that session, but it is not a general
 redaction guarantee for labels supplied by other sources.
 
 Release archives contain executable eBPF collector helpers next to the
-launcher so sibling lookup is explicit. They have ordinary `0755` mode only:
-no setuid bit and no file capability. Synesthesia does not install or
-privilege them. `demo`, `stdin`, `replay`, and `proc` are unprivileged;
+launcher under `bin/` so sibling lookup is explicit. They have ordinary `0755`
+mode only: no setuid bit and no file capability. Synesthesia does not install
+or privilege them. `demo`, `stdin`, `replay`, and `proc` are unprivileged;
 scheduler and TCP collection remain explicit privileged operations.
 
 `synesthesia doctor` is passive by default. It performs bounded read-only

@@ -36,7 +36,9 @@ if [[ $target_dir_absolute == / || $target_dir_absolute == "$repository_root" ]]
   exit 1
 fi
 dist_dir="$target_dir/dist"
-stage_dir="$dist_dir/stage"
+stage_parent="$dist_dir/stage"
+root_name="synesthesia-v${version}-${target_triple}"
+stage_dir="$stage_parent/$root_name"
 archive_path="$dist_dir/$archive_name"
 checksum_path="$archive_path.sha256"
 
@@ -58,17 +60,38 @@ release_rustflags+=" --remap-path-prefix=$cargo_home/registry/src=/cargo/registr
 RUSTFLAGS="$release_rustflags" \
   rustup run "$release_toolchain" cargo build --locked --release --features ebpf --bins
 
-rm -rf "$stage_dir"
+rm -rf "$stage_parent"
 rm -f "$archive_path" "$checksum_path"
-mkdir -p "$stage_dir"
+mkdir -p \
+  "$stage_dir/bin" \
+  "$stage_dir/share/man/man1" \
+  "$stage_dir/share/bash-completion/completions" \
+  "$stage_dir/share/zsh/site-functions" \
+  "$stage_dir/share/fish/vendor_completions.d" \
+  "$stage_dir/share/doc/synesthesia"
 
-install -m 0755 "$target_dir/release/synesthesia" "$stage_dir/synesthesia"
+install -m 0755 "$target_dir/release/synesthesia" "$stage_dir/bin/synesthesia"
 install -m 0755 \
   "$target_dir/release/synesthesia-scheduler-collector" \
-  "$stage_dir/synesthesia-scheduler-collector"
+  "$stage_dir/bin/synesthesia-scheduler-collector"
 install -m 0755 \
   "$target_dir/release/synesthesia-tcp-collector" \
-  "$stage_dir/synesthesia-tcp-collector"
+  "$stage_dir/bin/synesthesia-tcp-collector"
+"$target_dir/release/synesthesia" manpage \
+  >"$stage_dir/share/man/man1/synesthesia.1"
+"$target_dir/release/synesthesia" completions bash \
+  >"$stage_dir/share/bash-completion/completions/synesthesia"
+"$target_dir/release/synesthesia" completions zsh \
+  >"$stage_dir/share/zsh/site-functions/_synesthesia"
+"$target_dir/release/synesthesia" completions fish \
+  >"$stage_dir/share/fish/vendor_completions.d/synesthesia.fish"
+chmod 0644 \
+  "$stage_dir/share/man/man1/synesthesia.1" \
+  "$stage_dir/share/bash-completion/completions/synesthesia" \
+  "$stage_dir/share/zsh/site-functions/_synesthesia" \
+  "$stage_dir/share/fish/vendor_completions.d/synesthesia.fish"
+install -m 0644 docs/tcp-kernel-weather.gif \
+  "$stage_dir/share/doc/synesthesia/tcp-kernel-weather.gif"
 install -m 0644 README.md "$stage_dir/README.md"
 install -m 0644 RELEASE_NOTES.md "$stage_dir/RELEASE_NOTES.md"
 install -m 0644 LICENSE "$stage_dir/LICENSE"
@@ -84,8 +107,8 @@ tar \
   --numeric-owner \
   --mtime="@$SOURCE_DATE_EPOCH" \
   --mode='u+rwX,go+rX,go-w' \
-  -C "$stage_dir" \
-  -cf - . |
+  -C "$stage_parent" \
+  -cf - "$root_name" |
   gzip -n >"$archive_path"
 
 (

@@ -1,26 +1,31 @@
-# Synesthesia v0.2.0
+# Synesthesia v0.2.1
 
 Data in. Terminal weather out.
 
-This is the first downloadable Linux binary release of Synesthesia. It adds:
+This patch release makes installation and experimental-source troubleshooting
+less folkloric:
 
-- a bounded, event-driven ember layer for heavy semantic activity;
-- unprivileged Linux process weather from `/proc`;
-- experimental Linux eBPF scheduler weather;
-- experimental TCP retransmit lightning and reset impacts;
-- a bounded pre-trigger flight recorder with unprivileged replay;
-- deterministic ASCII snapshots and color ANSI rendering.
+- `synesthesia doctor` with read-only text and schema-v1 JSON reports;
+- Bash, Zsh, and Fish completions generated from the actual command tree;
+- a generated `synesthesia(1)` manual page;
+- a real rendering of a sanitized replay excerpt from the controlled TCP eBPF
+  capture;
+- a versioned archive containing `bin/` and `share/` trees.
 
 The archive targets x86_64 Linux with glibc. `demo`, `stdin`, `replay`, and
-`proc` run without privilege. Scheduler and TCP modes require explicit external
-BPF/perf-event privilege and compatible kernel BTF and tracepoints; Synesthesia
-never invokes `sudo`, installs capabilities, or creates setuid files.
+`proc` and passive doctor run without privilege. Scheduler, TCP, and the
+explicit `doctor --check-live` test require external BPF/perf-event privilege
+and compatible kernel BTF and tracepoints; Synesthesia never invokes `sudo`,
+installs capabilities, or creates setuid files.
 
 The eBPF sensors capture no packet payload, process arguments, environment,
 stack traces, or application-layer data. TCP recordings may contain endpoint
 metadata. Process recordings may contain bounded process names and PIDs unless
 `proc --anonymize` is used.
 
-Synesthesia remains experimental. It is a visual instrument, not packet
-inspection, a scheduler profiler, a diagnosis engine, or a production
-observability service.
+The new GIF is replay, not a live terminal recording. Its semantic pulses came
+from the real controlled namespace/netem eBPF capture and contain only
+documentation-range endpoints.
+
+Synesthesia remains experimental. Doctor diagnoses the privilege terrarium; it
+does not tend it.

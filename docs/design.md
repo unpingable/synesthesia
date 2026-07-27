@@ -330,8 +330,10 @@ are recorded in
 
 `scripts/build-release.sh` is the one packaging path used locally and by the
 tag workflow. It builds all three release binaries with the `ebpf` feature and
-`Cargo.lock`, then stages only the launcher, scheduler/TCP helpers, README,
-release notes, license, and notice. The archive is x86_64 Linux glibc only.
+`Cargo.lock`, then stages only the launcher, scheduler/TCP helpers, generated
+man page and completions, proof GIF, README, release notes, license, and
+notice. The archive is x86_64 Linux glibc only and uses one versioned root with
+`bin/` and `share/` subtrees.
 
 GNU tar receives sorted names, numeric root ownership, normalized modes, and a
 single `SOURCE_DATE_EPOCH`; gzip receives `-n`. SHA-256 is generated beside the

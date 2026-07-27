@@ -25,3 +25,23 @@ jobs:
         run: cargo test --workspace --all-features
       - name: Build release binaries
         run: cargo build --locked --release --features ebpf --bins
+      - name: Diagnose and generate documentation
+        run: |
+          ./target/release/synesthesia doctor
+          ./target/release/synesthesia doctor --format json | jq .
+          ./target/release/synesthesia completions bash > /tmp/synesthesia.bash
+          ./target/release/synesthesia completions zsh > /tmp/_synesthesia
+          ./target/release/synesthesia completions fish > /tmp/synesthesia.fish
+          ./target/release/synesthesia manpage > /tmp/synesthesia.1
+          test -s /tmp/synesthesia.bash
+          test -s /tmp/_synesthesia
+          test -s /tmp/synesthesia.fish
+          grep -q '^\.TH' /tmp/synesthesia.1
+      - name: Verify release package
+        run: |
+          ./scripts/build-release.sh
+          tar -tzf target/dist/*.tar.gz | grep -q '/bin/synesthesia$'
+          tar -tzf target/dist/*.tar.gz | grep -q '/share/man/man1/synesthesia.1$'
+          tar -tzf target/dist/*.tar.gz | grep -q '/share/bash-completion/completions/synesthesia$'
+          tar -tzf target/dist/*.tar.gz | grep -q '/share/zsh/site-functions/_synesthesia$'
+          tar -tzf target/dist/*.tar.gz | grep -q '/share/fish/vendor_completions.d/synesthesia.fish$'

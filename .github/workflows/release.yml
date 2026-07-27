@@ -25,6 +25,14 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --workspace --all-features
+      - name: Diagnose generated release tools
+        run: |
+          cargo build --locked --release --features ebpf --bins
+          ./target/release/synesthesia doctor --format json | jq .
+          ./target/release/synesthesia completions bash > /tmp/synesthesia.bash
+          ./target/release/synesthesia manpage > /tmp/synesthesia.1
+          test -s /tmp/synesthesia.bash
+          grep -q '^\.TH' /tmp/synesthesia.1
       - name: Package release
         run: ./scripts/build-release.sh
       - name: Publish GitHub release

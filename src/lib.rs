@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod doctor;
 pub mod event;
 pub mod flight_recorder;
 pub mod flight_runtime;

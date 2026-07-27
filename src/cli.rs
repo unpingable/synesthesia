@@ -30,6 +30,34 @@ pub enum Command {
     Ebpf(EbpfArgs),
     /// Print the supported NDJSON wire schema and an example.
     Schema,
+    /// Passively diagnose platform, terminal, procfs, and eBPF readiness.
+    Doctor(DoctorArgs),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum DoctorFormat {
+    #[default]
+    Text,
+    Json,
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Report format.
+    #[arg(long, value_enum, default_value_t)]
+    pub format: DoctorFormat,
+    /// Include stable check identifiers, observed values, and remediation hints.
+    #[arg(long)]
+    pub verbose: bool,
+    /// Disable colored status labels even on a terminal.
+    #[arg(long)]
+    pub no_color: bool,
+    /// Treat missing passive eBPF prerequisites as a requested-check failure.
+    #[arg(long)]
+    pub check_ebpf: bool,
+    /// Actively attach and immediately detach existing probes without generating work.
+    #[arg(long)]
+    pub check_live: bool,
 }
 
 #[derive(Debug, Args)]
@@ -303,5 +331,24 @@ mod tests {
         assert!(args.anonymize);
         assert!(Cli::try_parse_from(["synesthesia", "proc", "--interval", "10ms"]).is_err());
         assert!(Cli::try_parse_from(["synesthesia", "proc", "--interval", "6s"]).is_err());
+    }
+
+    #[test]
+    fn doctor_defaults_to_passive_text_and_live_is_explicit() {
+        let cli = Cli::try_parse_from(["synesthesia", "doctor"]).unwrap();
+        let Command::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert_eq!(args.format, DoctorFormat::Text);
+        assert!(!args.check_live);
+
+        let cli =
+            Cli::try_parse_from(["synesthesia", "doctor", "--format", "json", "--check-live"])
+                .unwrap();
+        let Command::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert_eq!(args.format, DoctorFormat::Json);
+        assert!(args.check_live);
     }
 }

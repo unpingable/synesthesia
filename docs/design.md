@@ -107,6 +107,26 @@ Streaming readers implement the internal `EventSource` trait; sampled sources
 use an equally narrow bounded batch boundary. Both emit `NormalizedEvent`.
 There is intentionally no plugin ABI, daemon, database, or network service.
 
+## Read-only diagnostics
+
+Doctor first captures a bounded `DiagnosticSnapshot` using only read-only
+kernel/procfs metadata, conventional terminal environment hints, TTY state,
+and sibling collector metadata. A pure report builder then produces typed
+`DoctorCheck` values and mode readiness; text and JSON render only that model.
+Tests inject synthetic snapshots rather than inspecting the qualification
+host.
+
+The live collectors and doctor share one internal prerequisite table for
+architecture, helper names, BTF type expectations, and all scheduler/TCP
+tracepoints. Passive doctor never calls the attachment code. Only the explicit
+`--check-live` path loads the already-built programs, attaches without
+generating activity, and immediately drops the links and maps.
+
+Tracepoint visibility, tracepoint presence, live attachment, and event
+occurrence remain separate claims. An inaccessible tracefs is reported as
+restricted—not as proof that a tracepoint is absent. Likewise root or relevant
+capabilities make attachment plausible but never guarantee verifier success.
+
 ## Experimental scheduler source implementation choice
 
 The local scheduler-source campaign qualified an x86_64 Ubuntu 6.8 host with

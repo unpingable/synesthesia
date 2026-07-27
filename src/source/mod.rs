@@ -5,6 +5,7 @@ use anyhow::Result;
 use crate::event::NormalizedEvent;
 
 pub mod demo;
+pub mod ebpf_prerequisites;
 pub mod lines;
 pub mod ndjson;
 pub mod procfs;

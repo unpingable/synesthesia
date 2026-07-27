@@ -6,14 +6,12 @@ use aya::{
     programs::TracePoint,
 };
 
-use crate::source::tcp::{KernelTcpEvent, TcpDecodeError, TcpSourceError};
+use crate::source::{
+    ebpf_prerequisites::{SUPPORTED_ARCHITECTURE, TCP_TRACEPOINTS},
+    tcp::{KernelTcpEvent, TcpDecodeError, TcpSourceError},
+};
 
 const BYTECODE: &[u8] = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/tcp.bpf.o"));
-const TRACEPOINTS: [(&str, &str); 3] = [
-    ("synesthesia_tcp_retransmit", "tcp_retransmit_skb"),
-    ("synesthesia_tcp_reset_sent", "tcp_send_reset"),
-    ("synesthesia_tcp_reset_received", "tcp_receive_reset"),
-];
 
 pub struct LiveTcp {
     // Program-owned links detach and all maps close when this value drops.
@@ -24,7 +22,7 @@ pub struct LiveTcp {
 
 impl LiveTcp {
     pub fn attach() -> Result<Self, TcpSourceError> {
-        if std::env::consts::ARCH != "x86_64" {
+        if std::env::consts::ARCH != SUPPORTED_ARCHITECTURE {
             return Err(TcpSourceError::UnsupportedArchitecture(
                 std::env::consts::ARCH.to_owned(),
             ));
@@ -36,11 +34,14 @@ impl LiveTcp {
         let mut bpf = Ebpf::load(BYTECODE).map_err(|error| {
             TcpSourceError::classify_load_message(&format!("{error}: {error:?}"))
         })?;
-        for (program_name, tracepoint_name) in TRACEPOINTS {
+        for tracepoint in TCP_TRACEPOINTS {
             let program: &mut TracePoint = bpf
-                .program_mut(program_name)
+                .program_mut(tracepoint.program)
                 .ok_or_else(|| {
-                    TcpSourceError::Load(format!("compiled program {program_name} is missing"))
+                    TcpSourceError::Load(format!(
+                        "compiled program {} is missing",
+                        tracepoint.program
+                    ))
                 })?
                 .try_into()
                 .map_err(|error: aya::programs::ProgramError| {
@@ -50,8 +51,8 @@ impl LiveTcp {
                 .load()
                 .map_err(|error| TcpSourceError::classify_load_message(&error.to_string()))?;
             program
-                .attach("tcp", tracepoint_name)
-                .map_err(|error| classify_attach_error(tracepoint_name, &error.to_string()))?;
+                .attach(tracepoint.group, tracepoint.name)
+                .map_err(|error| classify_attach_error(tracepoint.name, &error.to_string()))?;
         }
 
         let events = RingBuf::try_from(bpf.take_map("TCP_EVENTS").ok_or_else(|| {

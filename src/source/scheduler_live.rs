@@ -6,15 +6,12 @@ use aya::{
     programs::TracePoint,
 };
 
-use crate::source::scheduler::{KernelSchedulerEvent, SchedulerDecodeError, SchedulerSourceError};
+use crate::source::{
+    ebpf_prerequisites::{SCHEDULER_TRACEPOINTS, SUPPORTED_ARCHITECTURE},
+    scheduler::{KernelSchedulerEvent, SchedulerDecodeError, SchedulerSourceError},
+};
 
 const BYTECODE: &[u8] = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/scheduler.bpf.o"));
-const TRACEPOINTS: [(&str, &str); 4] = [
-    ("synesthesia_sched_switch", "sched_switch"),
-    ("synesthesia_sched_wakeup", "sched_wakeup"),
-    ("synesthesia_sched_wakeup_new", "sched_wakeup_new"),
-    ("synesthesia_sched_migrate", "sched_migrate_task"),
-];
 
 pub struct LiveScheduler {
     // Aya retains attached links in each program; dropping this detaches all of them.
@@ -25,7 +22,7 @@ pub struct LiveScheduler {
 
 impl LiveScheduler {
     pub fn attach() -> Result<Self, SchedulerSourceError> {
-        if std::env::consts::ARCH != "x86_64" {
+        if std::env::consts::ARCH != SUPPORTED_ARCHITECTURE {
             return Err(SchedulerSourceError::UnsupportedArchitecture(
                 std::env::consts::ARCH.to_owned(),
             ));
@@ -37,12 +34,13 @@ impl LiveScheduler {
         let mut bpf = Ebpf::load(BYTECODE).map_err(|error| {
             SchedulerSourceError::classify_load_message(&format!("{error}: {error:?}"))
         })?;
-        for (program_name, tracepoint_name) in TRACEPOINTS {
+        for tracepoint in SCHEDULER_TRACEPOINTS {
             let program: &mut TracePoint = bpf
-                .program_mut(program_name)
+                .program_mut(tracepoint.program)
                 .ok_or_else(|| {
                     SchedulerSourceError::Load(format!(
-                        "compiled program {program_name} is missing"
+                        "compiled program {} is missing",
+                        tracepoint.program
                     ))
                 })?
                 .try_into()
@@ -53,8 +51,8 @@ impl LiveScheduler {
                 .load()
                 .map_err(|error| SchedulerSourceError::classify_load_message(&error.to_string()))?;
             program
-                .attach("sched", tracepoint_name)
-                .map_err(|error| classify_attach_error(tracepoint_name, &error.to_string()))?;
+                .attach(tracepoint.group, tracepoint.name)
+                .map_err(|error| classify_attach_error(tracepoint.name, &error.to_string()))?;
         }
 
         let events = RingBuf::try_from(bpf.take_map("EVENTS").ok_or_else(|| {

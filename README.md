@@ -49,6 +49,32 @@ cargo run --release -- demo
 
 Synesthesia is not published to crates.io.
 
+## Diagnose an installation
+
+```sh
+./synesthesia doctor
+./synesthesia doctor --format json | jq .
+```
+
+Doctor passively reports platform, terminal, `/proc`, packaged-collector,
+kernel-BTF, tracepoint-visibility, and privilege readiness. It distinguishes
+missing support, restricted visibility, external privilege, and conditions
+that were simply not tested. A normal run never attaches probes, invokes
+`sudo`, generates traffic, changes mounts or sysctls, or writes a file.
+
+`--check-ebpf` makes passive eBPF prerequisites an explicitly requested check.
+`--check-live` is different: it actively attempts to attach and immediately
+detach the existing scheduler and TCP programs using only the privilege the
+caller already has. It generates no workload and creates no pins. Synesthesia
+never escalates itself.
+
+Text is the default; JSON follows the documented
+[doctor schema v1](docs/doctor-schema-v1.md). Exit status is `0` for a
+completed generally usable report, `1` when a requested check fails, and `2`
+when doctor itself cannot produce valid output. Default output is designed for
+public bug reports and contains no hostname, username, home path, endpoint,
+process identity, arguments, environment contents, or captured activity.
+
 ## Linux process weather without root
 
 ```sh

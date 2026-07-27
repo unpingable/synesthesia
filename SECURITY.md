@@ -72,6 +72,14 @@ no setuid bit and no file capability. Synesthesia does not install or
 privilege them. `demo`, `stdin`, `replay`, and `proc` are unprivileged;
 scheduler and TCP collection remain explicit privileged operations.
 
+`synesthesia doctor` is passive by default. It performs bounded read-only
+checks and deliberately omits hostnames, usernames, home paths, process
+identities, endpoint data, environment contents, and raw capability masks.
+`doctor --check-live` is an explicit active test: it attempts only the existing
+scheduler and TCP attachments with the caller's current privilege, generates
+no workload, and drops links and maps immediately. It never invokes `sudo`,
+changes security policy, or creates a persistent BPF pin.
+
 `examples/tcp-pathology-lab.sh` is an explicit root-operated qualification
 tool, not code invoked by Synesthesia. It creates two temporary network
 namespaces and a private veth/qdisc, refuses non-root execution, never changes

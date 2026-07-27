@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::source::{
+    ebpf_prerequisites::{SCHEDULER_COLLECTOR, SUPPORTED_ARCHITECTURE},
     scheduler::SchedulerSourceError,
     scheduler_ipc::{NormalizedSchedulerPulse, SchedulerWireError},
 };
@@ -20,7 +21,7 @@ impl SchedulerHelper {
         if !cfg!(target_os = "linux") {
             return Err(SchedulerSourceError::UnsupportedOperatingSystem);
         }
-        if std::env::consts::ARCH != "x86_64" {
+        if std::env::consts::ARCH != SUPPORTED_ARCHITECTURE {
             return Err(SchedulerSourceError::UnsupportedArchitecture(
                 std::env::consts::ARCH.to_owned(),
             ));
@@ -115,7 +116,7 @@ fn helper_path() -> Result<PathBuf, SchedulerSourceError> {
     let directory = executable.parent().ok_or_else(|| {
         SchedulerSourceError::Load("running executable has no parent directory".to_owned())
     })?;
-    let path = directory.join("synesthesia-scheduler-collector");
+    let path = directory.join(SCHEDULER_COLLECTOR);
     if is_executable_file(&path) {
         Ok(path)
     } else {

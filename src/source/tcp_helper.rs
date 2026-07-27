@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::source::{
+    ebpf_prerequisites::{SUPPORTED_ARCHITECTURE, TCP_COLLECTOR},
     tcp::TcpSourceError,
     tcp_ipc::{NormalizedTcpPulse, TcpWireError},
 };
@@ -20,7 +21,7 @@ impl TcpHelper {
         if !cfg!(target_os = "linux") {
             return Err(TcpSourceError::UnsupportedOperatingSystem);
         }
-        if std::env::consts::ARCH != "x86_64" {
+        if std::env::consts::ARCH != SUPPORTED_ARCHITECTURE {
             return Err(TcpSourceError::UnsupportedArchitecture(
                 std::env::consts::ARCH.to_owned(),
             ));
@@ -113,7 +114,7 @@ fn helper_path() -> Result<PathBuf, TcpSourceError> {
     let directory = executable.parent().ok_or_else(|| {
         TcpSourceError::Load("running executable has no parent directory".to_owned())
     })?;
-    let path = directory.join("synesthesia-tcp-collector");
+    let path = directory.join(TCP_COLLECTOR);
     if is_executable_file(&path) {
         Ok(path)
     } else {

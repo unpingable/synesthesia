@@ -32,6 +32,12 @@ fn main() -> Result<()> {
                 std::process::exit(outcome.exit_code.into());
             }
         }
+        Command::Completions(args) => {
+            synesthesia::generated::completions(args.shell, &mut std::io::stdout());
+        }
+        Command::Manpage => {
+            synesthesia::generated::manpage(&mut std::io::stdout())?;
+        }
         Command::Demo(args) => app::run_demo(args)?,
         Command::Stdin(args) => app::run_stdin(args)?,
         Command::Replay(args) => app::run_replay(args)?,

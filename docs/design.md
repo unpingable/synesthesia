@@ -127,6 +127,16 @@ occurrence remain separate claims. An inaccessible tracefs is reported as
 restricted—not as proof that a tracepoint is absent. Likewise root or relevant
 capabilities make attachment plausible but never guarantee verifier success.
 
+## Generated command documentation
+
+The Clap `Cli` definition is the only command tree. `completions` passes that
+tree to `clap_complete` for Bash, Zsh, or Fish; `manpage` passes it to
+`clap_mangen`, then appends small deterministic policy sections covering
+privilege, environment, exit status, privacy, project URL, and license.
+Neither artifact contains runtime status prose or terminal escapes. Local and
+GitHub release packaging invoke the exact built launcher so generated files
+match the shipped version.
+
 ## Experimental scheduler source implementation choice
 
 The local scheduler-source campaign qualified an x86_64 Ubuntu 6.8 host with

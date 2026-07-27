@@ -32,6 +32,24 @@ pub enum Command {
     Schema,
     /// Passively diagnose platform, terminal, procfs, and eBPF readiness.
     Doctor(DoctorArgs),
+    /// Generate a shell completion script from the current command tree.
+    Completions(CompletionArgs),
+    /// Generate the current synesthesia(1) manual page as roff.
+    Manpage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+#[derive(Debug, Args)]
+pub struct CompletionArgs {
+    /// Shell syntax to generate.
+    #[arg(value_enum)]
+    pub shell: CompletionShell,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]

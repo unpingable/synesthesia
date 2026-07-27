@@ -75,6 +75,28 @@ when doctor itself cannot produce valid output. Default output is designed for
 public bug reports and contains no hostname, username, home path, endpoint,
 process identity, arguments, environment contents, or captured activity.
 
+## Shell completions and manual page
+
+Generate Bash, Zsh, or Fish completions directly from the installed command
+tree:
+
+```sh
+synesthesia completions bash > ~/.local/share/bash-completion/completions/synesthesia
+synesthesia completions zsh > ~/.local/share/zsh/site-functions/_synesthesia
+synesthesia completions fish > ~/.config/fish/completions/synesthesia.fish
+```
+
+Those are conventional user-local examples, not directories Synesthesia
+creates or modifies. Release archives include the same generated files under
+`share/`.
+
+Generate the current roff manual from the same command model:
+
+```sh
+synesthesia manpage > synesthesia.1
+man ./synesthesia.1
+```
+
 ## Linux process weather without root
 
 ```sh

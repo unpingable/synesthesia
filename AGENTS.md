@@ -89,6 +89,9 @@ docs/demo.gif        Real generated terminal recording
 11. Process mode reads only the documented narrow `/proc` files. Do not add
     arguments, environments, paths, usernames, process memory, or an unbounded
     task table.
+12. Shell completions and the option-bearing parts of the man page are
+    generated from the one Clap command tree. Do not maintain parallel command
+    syntax by hand.
 
 ## What this is not
 

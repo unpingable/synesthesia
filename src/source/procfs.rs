@@ -51,6 +51,7 @@ pub struct ProcSample {
     pub stat: ProcStat,
     pub memory: Option<MemorySample>,
     pub net: Option<NetSample>,
+    pub net_missing: u64,
     pub unreadable: u64,
     pub vanished: u64,
     pub scan_refused: u64,
@@ -93,6 +94,9 @@ pub struct ProcStats {
     pub tracking_refused: u64,
     pub event_refused: u64,
     pub counter_resets: u64,
+    pub host_counter_resets: u64,
+    pub net_counter_resets: u64,
+    pub net_missing_interfaces: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -368,12 +372,12 @@ impl ProcTracker {
             let total_delta = monotonic_delta(
                 last_total,
                 sample.stat.total_cpu_ticks,
-                &mut self.stats.counter_resets,
+                &mut self.stats.host_counter_resets,
             );
             let idle_delta = monotonic_delta(
                 last_idle,
                 sample.stat.idle_cpu_ticks,
-                &mut self.stats.counter_resets,
+                &mut self.stats.host_counter_resets,
             );
             if total_delta > 0 {
                 let busy =
@@ -409,16 +413,18 @@ impl ProcTracker {
             );
         }
         if let (Some(previous), Some(current)) = (self.last_net, sample.net) {
+            // Clamp once so the event magnitude and its label always agree.
             let rx_delta = monotonic_delta(
                 previous.rx_bytes,
                 current.rx_bytes,
-                &mut self.stats.counter_resets,
-            );
+                &mut self.stats.net_counter_resets,
+            )
+            .min(MAX_NET_DELTA_BYTES);
             if rx_delta > 0 {
                 let mut event = host_event(
                     sample.timestamp,
                     "host.net.rx",
-                    rx_delta.min(MAX_NET_DELTA_BYTES) as f64,
+                    rx_delta as f64,
                     "rx_bytes",
                     rx_delta,
                 );
@@ -428,13 +434,14 @@ impl ProcTracker {
             let tx_delta = monotonic_delta(
                 previous.tx_bytes,
                 current.tx_bytes,
-                &mut self.stats.counter_resets,
-            );
+                &mut self.stats.net_counter_resets,
+            )
+            .min(MAX_NET_DELTA_BYTES);
             if tx_delta > 0 {
                 let mut event = host_event(
                     sample.timestamp,
                     "host.net.tx",
-                    tx_delta.min(MAX_NET_DELTA_BYTES) as f64,
+                    tx_delta as f64,
                     "tx_bytes",
                     tx_delta,
                 );
@@ -443,6 +450,7 @@ impl ProcTracker {
             }
         }
         self.last_net = sample.net;
+        self.stats.net_missing_interfaces = sample.net_missing;
         if self.last_running != Some(sample.stat.procs_running) {
             self.push_event(
                 &mut events,
@@ -718,8 +726,13 @@ pub struct NetInterfaceSample {
     pub tx_bytes: u64,
 }
 
-pub fn parse_net_dev(input: &str) -> Result<Vec<NetInterfaceSample>, ProcParseError> {
+/// Parse `/proc/net/dev` rows into per-interface counters. Per-line fault
+/// isolation: a malformed row is skipped and counted, never allowed to
+/// discard the readable interfaces around it. Requires only the columns
+/// actually read (rx_bytes first, tx_bytes ninth).
+pub fn parse_net_dev(input: &str) -> (Vec<NetInterfaceSample>, u64) {
     let mut interfaces = Vec::new();
+    let mut skipped = 0_u64;
     for line in input.lines() {
         let Some((name, counters)) = line.split_once(':') else {
             continue;
@@ -728,28 +741,37 @@ pub fn parse_net_dev(input: &str) -> Result<Vec<NetInterfaceSample>, ProcParseEr
             break;
         }
         let fields: Vec<&str> = counters.split_ascii_whitespace().collect();
-        // rx_bytes is the first counter column, tx_bytes the ninth.
-        if fields.len() < 16 {
-            return Err(ProcParseError::MissingField("net/dev counters"));
+        if fields.len() <= 8 {
+            skipped = skipped.saturating_add(1);
+            continue;
         }
+        let (Ok(rx_bytes), Ok(tx_bytes)) = (parse_u64(fields[0]), parse_u64(fields[8])) else {
+            skipped = skipped.saturating_add(1);
+            continue;
+        };
         interfaces.push(NetInterfaceSample {
             name: name.trim().to_owned(),
-            rx_bytes: parse_u64(fields[0])?,
-            tx_bytes: parse_u64(fields[8])?,
+            rx_bytes,
+            tx_bytes,
         });
     }
-    Ok(interfaces)
+    (interfaces, skipped)
 }
 
 /// Sum the interfaces the operator selected, or an automatic set: physical
 /// interfaces (those with a backing `device` entry under the sysfs class
 /// directory), excluding loopback; when nothing qualifies as physical (for
 /// example inside a container), fall back to every non-loopback interface.
+///
+/// The second return value counts explicitly selected interface names that
+/// were absent from the sample, so a partial match is surfaced rather than
+/// silently narrowing the operator's chosen set.
 pub fn aggregate_net(
     interfaces: &[NetInterfaceSample],
     selected: &[String],
     is_physical: impl Fn(&str) -> bool,
-) -> Option<NetSample> {
+) -> (Option<NetSample>, u64) {
+    let mut missing = 0_u64;
     let chosen: Vec<&NetInterfaceSample> = if selected.is_empty() {
         let physical: Vec<&NetInterfaceSample> = interfaces
             .iter()
@@ -764,20 +786,24 @@ pub fn aggregate_net(
             physical
         }
     } else {
+        missing = selected
+            .iter()
+            .filter(|name| !interfaces.iter().any(|interface| interface.name == **name))
+            .count() as u64;
         interfaces
             .iter()
             .filter(|interface| selected.contains(&interface.name))
             .collect()
     };
     if chosen.is_empty() {
-        return None;
+        return (None, missing);
     }
     let mut total = NetSample::default();
     for interface in chosen {
         total.rx_bytes = total.rx_bytes.saturating_add(interface.rx_bytes);
         total.tx_bytes = total.tx_bytes.saturating_add(interface.tx_bytes);
     }
-    Some(total)
+    (Some(total), missing)
 }
 
 fn parse_u64(value: &str) -> Result<u64, ProcParseError> {
@@ -857,14 +883,15 @@ impl LiveProcSource {
         }
         let net_path = self.root.join("net/dev");
         match std::fs::read_to_string(&net_path) {
-            Ok(input) => match parse_net_dev(&input) {
-                Ok(interfaces) => {
-                    sample.net = aggregate_net(&interfaces, &self.net_interfaces, |name| {
-                        self.sys_class_net.join(name).join("device").exists()
-                    });
-                }
-                Err(_) => sample.unreadable = sample.unreadable.saturating_add(1),
-            },
+            Ok(input) => {
+                let (interfaces, skipped) = parse_net_dev(&input);
+                sample.unreadable = sample.unreadable.saturating_add(skipped);
+                let (net, missing) = aggregate_net(&interfaces, &self.net_interfaces, |name| {
+                    self.sys_class_net.join(name).join("device").exists()
+                });
+                sample.net = net;
+                sample.net_missing = missing;
+            }
             Err(_) => sample.unreadable = sample.unreadable.saturating_add(1),
         }
 
@@ -1144,7 +1171,33 @@ mod tests {
         let events = tracker.ingest(reset);
         assert!(events.iter().all(|event| event.category != "host.net.rx"));
         assert!(events.iter().any(|event| event.category == "host.net.tx"));
-        assert_eq!(tracker.stats().counter_resets, 1);
+        // Reset diagnostics stay attributable to their domain.
+        assert_eq!(tracker.stats().net_counter_resets, 1);
+        assert_eq!(tracker.stats().counter_resets, 0);
+        assert_eq!(tracker.stats().host_counter_resets, 0);
+    }
+
+    #[test]
+    fn net_magnitude_and_label_agree_after_clamping() {
+        let mut tracker = ProcTracker::new(false, 7);
+        let mut first = sample(0.0, Vec::new());
+        first.net = Some(NetSample {
+            rx_bytes: 0,
+            tx_bytes: 0,
+        });
+        tracker.ingest(first);
+        let mut burst = sample(0.25, Vec::new());
+        burst.net = Some(NetSample {
+            rx_bytes: 3 << 30,
+            tx_bytes: 0,
+        });
+        let events = tracker.ingest(burst);
+        let rx = events
+            .iter()
+            .find(|event| event.category == "host.net.rx")
+            .unwrap();
+        assert_eq!(rx.magnitude, (1_u64 << 30) as f64);
+        assert_eq!(rx.labels["rx_bytes"], (1_u64 << 30).to_string());
     }
 
     #[test]
@@ -1154,31 +1207,53 @@ mod tests {
     lo:  700     10    0    0    0     0          0         0      700      10    0    0    0     0       0          0\n\
   eth0: 1000    100    0    0    0     0          0         0     2000     200    0    0    0     0       0          0\n\
  veth1:  111      1    0    0    0     0          0         0      222       2    0    0    0     0       0          0\n";
-        let interfaces = parse_net_dev(input).unwrap();
+        let (interfaces, skipped) = parse_net_dev(input);
+        assert_eq!(skipped, 0);
         assert_eq!(interfaces.len(), 3);
         assert_eq!(interfaces[1].name, "eth0");
         assert_eq!(interfaces[1].rx_bytes, 1_000);
         assert_eq!(interfaces[1].tx_bytes, 2_000);
 
         // Physical selection excludes loopback and virtual interfaces.
-        let physical = aggregate_net(&interfaces, &[], |name| name == "eth0").unwrap();
-        assert_eq!(physical.rx_bytes, 1_000);
-        assert_eq!(physical.tx_bytes, 2_000);
+        let (physical, missing) = aggregate_net(&interfaces, &[], |name| name == "eth0");
+        assert_eq!(physical.unwrap().rx_bytes, 1_000);
+        assert_eq!(missing, 0);
 
         // No physical interface at all -> every non-loopback interface counts.
-        let fallback = aggregate_net(&interfaces, &[], |_| false).unwrap();
-        assert_eq!(fallback.rx_bytes, 1_111);
-        assert_eq!(fallback.tx_bytes, 2_222);
+        let (fallback, _) = aggregate_net(&interfaces, &[], |_| false);
+        assert_eq!(fallback.unwrap().rx_bytes, 1_111);
+        assert_eq!(fallback.unwrap().tx_bytes, 2_222);
 
         // An explicit selection wins over auto-detection.
-        let explicit =
-            aggregate_net(&interfaces, &["lo".to_owned()], |name| name == "eth0").unwrap();
-        assert_eq!(explicit.rx_bytes, 700);
+        let (explicit, missing) =
+            aggregate_net(&interfaces, &["lo".to_owned()], |name| name == "eth0");
+        assert_eq!(explicit.unwrap().rx_bytes, 700);
+        assert_eq!(missing, 0);
+
+        // A partially matched selection is surfaced, not silently narrowed.
+        let (partial, missing) = aggregate_net(
+            &interfaces,
+            &["eth0".to_owned(), "wlan9".to_owned()],
+            |_| true,
+        );
+        assert_eq!(partial.unwrap().rx_bytes, 1_000);
+        assert_eq!(missing, 1);
 
         // Selecting only absent interfaces yields no sample, not zeros.
-        assert!(aggregate_net(&interfaces, &["wlan9".to_owned()], |_| true).is_none());
+        let (none, missing) = aggregate_net(&interfaces, &["wlan9".to_owned()], |_| true);
+        assert!(none.is_none());
+        assert_eq!(missing, 1);
 
-        assert!(parse_net_dev("  eth0: 12 3\n").is_err());
+        // One malformed row is skipped and counted; it does not discard the
+        // readable interfaces around it.
+        let (partial_parse, skipped) = parse_net_dev(
+            "  eth0: 12 3\n\
+  eth1: 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16\n",
+        );
+        assert_eq!(skipped, 1);
+        assert_eq!(partial_parse.len(), 1);
+        assert_eq!(partial_parse[0].name, "eth1");
+        assert_eq!(partial_parse[0].tx_bytes, 9);
     }
 
     #[test]

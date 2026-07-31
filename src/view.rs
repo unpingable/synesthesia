@@ -741,24 +741,31 @@ const METER_LANES: &[MeterLane] = &[
         ceiling: 125_000_000.0,
         direction: Direction::Outbound,
     },
+    // Deliberately "proc", not "disk": these are summed per-process accounted
+    // I/O deltas (bounded tracking, no kernel/unattributed I/O), not host
+    // storage throughput. A /proc/diskstats lane would be a separate source.
     MeterLane {
         category: "proc.io.read",
-        label: "dsk r",
+        label: "proc r",
         gauge: false,
         ceiling: 512.0 * 1024.0 * 1024.0,
         direction: Direction::Inbound,
     },
     MeterLane {
         category: "proc.io.write",
-        label: "dsk w",
+        label: "proc w",
         gauge: false,
         ceiling: 512.0 * 1024.0 * 1024.0,
         direction: Direction::Outbound,
     },
 ];
 
-const METER_GAUGE_HOLD_SECONDS: f64 = 0.6;
 const METER_GAUGE_RELEASE_SECONDS: f64 = 1.2;
+/// Preferred recency horizon for rate lanes. A time preference only — never a
+/// rate denominator; rates always divide by actually covered duration.
+const METER_RATE_TARGET_SECONDS: f64 = 1.0;
+/// Staleness deadline for a gauge with no observed sample cadence yet.
+const METER_GAUGE_STALE_FLOOR_SECONDS: f64 = 1.0;
 
 struct MeterBar {
     label: String,
@@ -774,72 +781,137 @@ fn meter(
     field_height: u16,
     options: &ViewOptions,
 ) {
+    match meter_bars(snapshot) {
+        Some(bars) => draw_bars(frame, field_height, &bars, options.mode),
+        None => meter_generic(snapshot, frame, field_height, options),
+    }
+}
+
+/// Compute the six contract-lane bars from snapshot history alone. Returns
+/// None when no known lane has any retained sample, so the caller can fall
+/// back to the generic relative view. All time bases are event timestamps;
+/// the configured sampler interval is never used as a denominator.
+fn meter_bars(snapshot: &ModelSnapshot) -> Option<Vec<MeterBar>> {
     let retention = snapshot.decay_seconds * 2.5;
-    let interval = options
-        .proc
-        .map(|proc| proc.interval_ms as f64 / 1_000.0)
-        .filter(|seconds| *seconds > 0.0)
-        .unwrap_or(0.25);
-    let window = (interval * 2.5).clamp(1.0_f64.min(retention), retention.max(0.25));
     let hashes: Vec<u64> = METER_LANES
         .iter()
         .map(|lane| stable_hash(lane.category.as_bytes()))
         .collect();
-    let hold = (interval * 2.0).max(METER_GAUGE_HOLD_SECONDS);
-    let mut levels = vec![0.0_f64; METER_LANES.len()];
-    let mut rate_sums = vec![0.0_f64; METER_LANES.len()];
-    let mut peaks = vec![0.0_f64; METER_LANES.len()];
-    let mut matched = false;
+    // Chronological (oldest-first) per-lane sample lists, bounded by the
+    // model's own activity ring.
+    let mut samples: Vec<Vec<(f64, f64)>> = vec![Vec::new(); METER_LANES.len()];
     for activity in &snapshot.activity {
         let age = (snapshot.now - activity.born).max(0.0);
         if age > retention {
             continue;
         }
-        let Some(index) = hashes.iter().position(|hash| *hash == activity.category) else {
-            continue;
-        };
-        matched = true;
-        let lane = &METER_LANES[index];
-        if lane.gauge {
-            // Instant attack: the newest sample holds at full value; older
-            // samples release linearly, all derived from timestamped snapshot
-            // history — no hidden view state.
-            let value = (activity.magnitude / lane.ceiling).clamp(0.0, 1.0);
-            let envelope = if age <= hold {
-                1.0
-            } else {
-                (1.0 - (age - hold) / METER_GAUGE_RELEASE_SECONDS).max(0.0)
-            };
-            levels[index] = levels[index].max(value * envelope);
-            peaks[index] = peaks[index].max(value);
-        } else {
-            if age <= window {
-                rate_sums[index] += activity.magnitude;
-            }
-            // Approximate instantaneous rate for the retention-bounded peak.
-            peaks[index] = peaks[index].max((activity.magnitude / interval) / lane.ceiling);
+        if let Some(index) = hashes.iter().position(|hash| *hash == activity.category) {
+            samples[index].push((activity.born, activity.magnitude));
         }
     }
-    if !matched {
-        meter_generic(snapshot, frame, field_height, options);
-        return;
+    if samples.iter().all(Vec::is_empty) {
+        return None;
     }
-    let bars: Vec<MeterBar> = METER_LANES
-        .iter()
-        .enumerate()
-        .map(|(index, lane)| MeterBar {
-            label: lane.label.to_owned(),
-            level: if lane.gauge {
-                levels[index]
-            } else {
-                (rate_sums[index] / window / lane.ceiling).clamp(0.0, 1.0)
-            },
-            peak: peaks[index].clamp(0.0, 1.0),
-            category: hashes[index],
-            direction: lane.direction,
+    Some(
+        METER_LANES
+            .iter()
+            .enumerate()
+            .map(|(index, lane)| {
+                let lane_samples = &samples[index];
+                let (level, peak) = if lane.gauge {
+                    (
+                        gauge_level(lane_samples, snapshot.now) / lane.ceiling,
+                        lane_samples
+                            .iter()
+                            .map(|(_, value)| value / lane.ceiling)
+                            .fold(0.0, f64::max),
+                    )
+                } else {
+                    (
+                        rate_level(lane_samples, snapshot.now) / lane.ceiling,
+                        rate_peak(lane_samples) / lane.ceiling,
+                    )
+                };
+                MeterBar {
+                    label: lane.label.to_owned(),
+                    level: level.clamp(0.0, 1.0),
+                    peak: peak.clamp(0.0, 1.0),
+                    category: hashes[index],
+                    direction: lane.direction,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Sample-and-hold gauge semantics: the newest observation stands verbatim
+/// until it is stale, then decays. Staleness is judged against the observed
+/// sample cadence (gap between the two newest samples), never a configured
+/// interval. No max-over-history: a genuine drop shows immediately.
+fn gauge_level(samples: &[(f64, f64)], now: f64) -> f64 {
+    let Some(&(newest_born, value)) = samples.last() else {
+        return 0.0;
+    };
+    let observed_gap = if samples.len() >= 2 {
+        (newest_born - samples[samples.len() - 2].0).max(0.0)
+    } else {
+        0.0
+    };
+    let deadline = (observed_gap * 2.5).max(METER_GAUGE_STALE_FLOOR_SECONDS);
+    let age = (now - newest_born).max(0.0);
+    if age <= deadline {
+        value
+    } else {
+        value * (1.0 - (age - deadline) / METER_GAUGE_RELEASE_SECONDS).max(0.0)
+    }
+}
+
+/// Rate from actually covered duration. Walk newest-to-oldest until at least
+/// METER_RATE_TARGET_SECONDS of span is covered (or samples run out), then
+/// divide the summed deltas by the real span plus the oldest included delta's
+/// own inter-arrival coverage. A delta that arrives after a stall therefore
+/// spreads over the stall it covered instead of spiking a nominal window.
+fn rate_level(samples: &[(f64, f64)], _now: f64) -> f64 {
+    let Some(&(newest_born, _)) = samples.last() else {
+        return 0.0;
+    };
+    let mut sum = 0.0;
+    let mut count = 0_usize;
+    let mut oldest_index = samples.len() - 1;
+    for (index, &(born, magnitude)) in samples.iter().enumerate().rev() {
+        sum += magnitude;
+        count += 1;
+        oldest_index = index;
+        if count >= 2 && newest_born - born >= METER_RATE_TARGET_SECONDS {
+            break;
+        }
+    }
+    let span = (newest_born - samples[oldest_index].0).max(0.0);
+    let covered = if count >= 2 {
+        let oldest_coverage = if oldest_index > 0 {
+            (samples[oldest_index].0 - samples[oldest_index - 1].0).max(0.0)
+        } else {
+            span / (count as f64 - 1.0)
+        };
+        // Epsilon floor: identical timestamps must not divide by ~zero.
+        (span + oldest_coverage).max(0.05)
+    } else {
+        METER_RATE_TARGET_SECONDS
+    };
+    sum / covered
+}
+
+/// Retention-bounded peak from per-delta instantaneous rates, each delta
+/// divided by its own actual inter-arrival gap. The first retained sample has
+/// no observed baseline and is excluded rather than guessed.
+fn rate_peak(samples: &[(f64, f64)]) -> f64 {
+    samples
+        .windows(2)
+        .filter_map(|pair| {
+            let gap = pair[1].0 - pair[0].0;
+            (gap > 0.0).then(|| pair[1].1 / gap)
         })
-        .collect();
-    draw_bars(frame, field_height, &bars, options.mode);
+        .fold(0.0, f64::max)
 }
 
 /// Fallback for sources with no known meter lanes: relative "loudness" bars
@@ -855,7 +927,11 @@ fn meter_generic(
     let window = 1.0_f64.min(retention.max(0.25));
     let buckets = usize::from((frame.width / 8).clamp(4, 16));
     let mut sums = vec![0.0_f64; buckets];
-    let mut categories = vec![0_u64; buckets];
+    // Distinct categories that alias into one bucket are summed together and
+    // the last writer's category/direction colors the bucket — accepted for a
+    // relative fallback. Option instead of a 0 sentinel so a genuine category
+    // hash of 0 is not misread as an empty bucket.
+    let mut categories: Vec<Option<u64>> = vec![None; buckets];
     let mut directions = vec![Direction::Unknown; buckets];
     for activity in &snapshot.activity {
         let age = (snapshot.now - activity.born).max(0.0);
@@ -864,7 +940,7 @@ fn meter_generic(
         }
         let index = (activity.category % buckets as u64) as usize;
         sums[index] += activity.magnitude;
-        categories[index] = activity.category;
+        categories[index] = Some(activity.category);
         directions[index] = activity.direction;
     }
     let loudest = sums.iter().cloned().fold(0.0_f64, f64::max);
@@ -876,11 +952,7 @@ fn meter_generic(
             label: format!("{index:x}"),
             level: ((sums[index] / loudest) * f64::from(options.gain)).clamp(0.0, 1.0),
             peak: 0.0,
-            category: if categories[index] == 0 {
-                index as u64
-            } else {
-                categories[index]
-            },
+            category: categories[index].unwrap_or(index as u64),
             direction: directions[index],
         })
         .collect();
@@ -1513,7 +1585,7 @@ mod tests {
         assert_eq!(first, render());
         assert!(first.is_ascii());
         assert!(!first.contains('\x1b'));
-        for label in ["cpu", "mem", "net rx", "net tx", "dsk r", "dsk w"] {
+        for label in ["cpu", "mem", "net rx", "net tx", "proc r", "proc w"] {
             assert!(first.contains(label), "missing lane label {label}");
         }
 
@@ -1557,6 +1629,73 @@ mod tests {
         let upper_without: String = without_peak.lines().take(10).collect();
         assert!(upper_with.contains('-'));
         assert!(!upper_without.contains('-'));
+    }
+
+    // Regression obligations from the 2026-07-31 external review of the
+    // frozen meter prototype (meter-review-kimi.txt). Findings 1 and 2.
+
+    #[test]
+    fn gauge_shows_newest_observation_not_recent_maximum() {
+        // Review finding 2: after a genuine drop the old high sample must not
+        // dominate or fabricate a release glide.
+        let samples = [(1.75, 0.9), (2.0, 0.1)];
+        assert_eq!(gauge_level(&samples, 2.1), 0.1);
+
+        // Steady value holds exactly, without inter-sample sawtooth.
+        let steady = [(0.0, 0.5), (0.25, 0.5), (0.5, 0.5)];
+        assert_eq!(gauge_level(&steady, 0.6), 0.5);
+    }
+
+    #[test]
+    fn gauge_holds_while_fresh_and_decays_only_when_stale() {
+        // A lone observation holds verbatim inside the staleness floor...
+        let lone = [(0.0, 0.8)];
+        assert_eq!(gauge_level(&lone, 0.5), 0.8);
+        // ...and decays to zero once long stale, rather than claiming the
+        // level persists without evidence.
+        assert_eq!(gauge_level(&lone, 3.0), 0.0);
+
+        // With an observed 5s cadence, the deadline scales: a 4s-old sample
+        // is still fresh, not decayed.
+        let slow = [(0.0, 0.7), (5.0, 0.7)];
+        assert_eq!(gauge_level(&slow, 9.0), 0.7);
+    }
+
+    #[test]
+    fn rate_spreads_a_stall_covering_delta_over_its_actual_duration() {
+        // Review finding 1: a delta arriving after a 5s stall carries 5s of
+        // traffic and must not read as a 1-second burst.
+        let samples = [
+            (0.0, 100.0),
+            (0.25, 100.0),
+            (0.5, 100.0),
+            (0.75, 100.0),
+            (1.0, 100.0),
+            (6.0, 2_000.0),
+        ];
+        let rate = rate_level(&samples, 6.0);
+        // True average over the covered span is ~400 units/s; the pre-repair
+        // code reported 2000+.
+        assert!(rate > 250.0 && rate < 600.0, "rate was {rate}");
+    }
+
+    #[test]
+    fn rate_peak_divides_each_delta_by_its_own_gap() {
+        let samples = [(0.0, 100.0), (0.25, 100.0), (5.25, 2_000.0)];
+        let peak = rate_peak(&samples);
+        // 100/0.25 = 400 and 2000/5 = 400: the stall delta must not be
+        // divided by a configured 250ms interval into a 8000 phantom peak.
+        assert!((peak - 400.0).abs() < 1.0, "peak was {peak}");
+    }
+
+    #[test]
+    fn rate_of_steady_stream_matches_throughput() {
+        let samples: Vec<(f64, f64)> = (0..12)
+            .map(|index| (f64::from(index) * 0.25, 250.0))
+            .collect();
+        let rate = rate_level(&samples, 3.0);
+        // 250 units per 0.25s -> 1000 units/s.
+        assert!((rate - 1_000.0).abs() < 150.0, "rate was {rate}");
     }
 
     #[test]

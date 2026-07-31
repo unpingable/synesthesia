@@ -187,7 +187,9 @@ fn color_for(
         ),
         Theme::Amber => Color::Rgb(85 + level.saturating_mul(2) / 3, 30 + level / 2, 8),
         Theme::Cold => match direction {
-            Direction::Inbound => Color::Rgb(30, 100 + level / 2, 130 + level / 2),
+            // Saturating: 130 + 255/2 overflows u8 at full intensity — a panic
+            // in debug builds, a silent wrong color in release.
+            Direction::Inbound => Color::Rgb(30, 100 + level / 2, 130_u8.saturating_add(level / 2)),
             Direction::Outbound => Color::Rgb(85 + level / 3, 45 + level / 3, 150 + level / 3),
             _ => Color::Rgb(35 + level / 4, 90 + level / 2, 110 + level / 2),
         },
@@ -198,6 +200,14 @@ fn color_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cold_inbound_full_intensity_does_not_overflow() {
+        assert_eq!(
+            color_for(Theme::Cold, 1.0, 0, Direction::Inbound, true),
+            Color::Rgb(30, 227, 255)
+        );
+    }
 
     #[test]
     fn status_row_overwrites_field_echoes() {

@@ -167,6 +167,41 @@ The source excerpt and reproducible tape are checked in beside the other
 examples. The GIF contains no terminal prompt, hostname, username, home path,
 shell history, or real endpoint.
 
+### Meter and theme campaign
+
+Lead collaboration: Anthropic Claude (Claude Code, Fable 5).
+
+A later human-directed campaign added host CPU/memory/network lanes to the
+procfs source, the calibrated meter equalizer view, the rainbow and pastel
+themes with an xterm-256 color tier, and one pre-existing overflow fix:
+
+- `1d6b1cf` — fix cold theme inbound blue channel overflow at full intensity
+- `5da3e62` — add rainbow and pastel themes, theme aliases, and an ANSI-256 tier
+- `a39552d` — add host cpu, memory, and network lanes and a meter equalizer view
+- `d5a2259` — repair meter semantics per external review findings
+- `cdb75bc` — project meter rate lanes perceptually with a linear opt-in
+- `9ba2882` — document meter, host lanes, themes, and their review qualification
+
+This campaign used three AI systems in distinct functions under human
+direction. Anthropic Claude implemented, tested, and documented the changes
+and orchestrated the review workflow. OpenAI ChatGPT contributed design
+critique and direction through the operator: the lane-contract framing, the
+sample-and-hold gauge challenge, the honest-labeling and covered-duration
+review challenges, and the perceptual-scaling decision. Moonshot Kimi served
+as the independent external reviewer: a frozen-prototype desk review, a
+repair re-review against explicit obligations, and two merge-gate verdicts,
+all without repository access. The human operator set requirements, validated
+the display against live workloads, and made the merge decision. The review
+evidence is distilled in `docs/meter-theme-qualification.md`.
+
+The meter, projection, and color implementations are original Rust. The
+equalizer and peak-cap presentation follows the familiar audio-meter idiom as
+a concept; no code was copied from Cava, Winamp-family visualizers, btop,
+or other meters. The HSV conversion and xterm-256 quantization implement
+standard published formulas. No new third-party dependency and no new
+fixtures were added; live validation traffic (NFS, builds, browsing) was
+observed interactively and never recorded into the repository.
+
 ## Provenance basis and limits
 
 This document is a functional attribution record based on commit history,
@@ -187,4 +222,4 @@ may vary across sessions and are not exhaustively reconstructed here.
 
 ---
 
-This document reflects the project state as of 2026-07-26 and may be revised.
+This document reflects the project state as of 2026-07-31 and may be revised.

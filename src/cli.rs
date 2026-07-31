@@ -165,10 +165,15 @@ pub enum ViewKind {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum Theme {
     #[default]
+    #[value(alias = "matrix")]
     Phosphor,
     Amber,
+    #[value(alias = "ice")]
     Cold,
+    #[value(alias = "mono")]
     Monochrome,
+    Rainbow,
+    Pastel,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -349,6 +354,24 @@ mod tests {
         assert!(args.anonymize);
         assert!(Cli::try_parse_from(["synesthesia", "proc", "--interval", "10ms"]).is_err());
         assert!(Cli::try_parse_from(["synesthesia", "proc", "--interval", "6s"]).is_err());
+    }
+
+    #[test]
+    fn theme_aliases_parse_to_their_canonical_variants() {
+        for (name, expected) in [
+            ("matrix", Theme::Phosphor),
+            ("phosphor", Theme::Phosphor),
+            ("ice", Theme::Cold),
+            ("mono", Theme::Monochrome),
+            ("rainbow", Theme::Rainbow),
+            ("pastel", Theme::Pastel),
+        ] {
+            let cli = Cli::try_parse_from(["synesthesia", "demo", "--theme", name]).unwrap();
+            let Command::Demo(args) = cli.command else {
+                panic!("expected demo command");
+            };
+            assert_eq!(args.visual.theme, expected, "--theme {name}");
+        }
     }
 
     #[test]

@@ -20,7 +20,7 @@ use crate::{
     ingestion::{Ingress, event_buffer},
     model::TemporalModel,
     recording::{Recorder, ReplaySource},
-    render::GridWidget,
+    render::{ColorDepth, GridWidget},
     source::{
         EventSource, demo::DemoSource, lines::LineSource, ndjson::NdjsonSource,
         tshark::TsharkTsvSource,
@@ -437,7 +437,7 @@ fn run_interactive(
     let _producer_guard = spawn_producer(producer, ingress, Arc::clone(&producer_stats));
 
     let mut session = TerminalSession::enter()?;
-    let truecolor = terminal_truecolor();
+    let depth = terminal_color_depth();
     let ansi_allowed = terminal_color();
     let mut state = UiState {
         mode: if visual.mode == DisplayMode::Ansi && !ansi_allowed {
@@ -522,7 +522,7 @@ fn run_interactive(
                         frame: &frame,
                         mode: state.mode,
                         theme: state.theme,
-                        truecolor,
+                        depth,
                     },
                     terminal_frame.area(),
                 );
@@ -616,7 +616,9 @@ fn handle_key(
                 Theme::Phosphor => Theme::Amber,
                 Theme::Amber => Theme::Cold,
                 Theme::Cold => Theme::Monochrome,
-                Theme::Monochrome => Theme::Phosphor,
+                Theme::Monochrome => Theme::Rainbow,
+                Theme::Rainbow => Theme::Pastel,
+                Theme::Pastel => Theme::Phosphor,
             };
         }
         KeyCode::Char('+') | KeyCode::Char('=') => state.gain = (state.gain * 1.15).min(4.0),
@@ -911,10 +913,17 @@ fn terminal_color() -> bool {
         && std::env::var("TERM").map_or(true, |term| term != "dumb")
 }
 
-fn terminal_truecolor() -> bool {
-    terminal_color()
+fn terminal_color_depth() -> ColorDepth {
+    if terminal_color()
         && std::env::var("COLORTERM")
             .is_ok_and(|value| value.contains("truecolor") || value.contains("24bit"))
+    {
+        ColorDepth::Truecolor
+    } else if std::env::var("TERM").is_ok_and(|term| term.contains("256color")) {
+        ColorDepth::Xterm256
+    } else {
+        ColorDepth::Ansi16
+    }
 }
 
 #[cfg(test)]
@@ -954,7 +963,7 @@ mod tests {
                         frame: &composed,
                         mode: DisplayMode::Ascii,
                         theme: Theme::Monochrome,
-                        truecolor: false,
+                        depth: ColorDepth::Ansi16,
                     },
                     frame.area(),
                 );

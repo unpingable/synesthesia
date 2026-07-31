@@ -11,6 +11,8 @@ pub const MAX_TRACKED_PROCESSES: usize = 4_096;
 pub const MAX_EVENTS_PER_SAMPLE: usize = 8_192;
 const MAX_COMM_CHARS: usize = 64;
 const MAX_DELTA_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_NET_DELTA_BYTES: u64 = 1 << 30;
+const MAX_NET_INTERFACES: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessSample {
@@ -35,12 +37,20 @@ pub struct MemorySample {
     pub available_kib: u64,
 }
 
+/// Aggregated byte counters over the selected network interfaces.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NetSample {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProcSample {
     pub timestamp: f64,
     pub processes: Vec<ProcessSample>,
     pub stat: ProcStat,
     pub memory: Option<MemorySample>,
+    pub net: Option<NetSample>,
     pub unreadable: u64,
     pub vanished: u64,
     pub scan_refused: u64,
@@ -102,6 +112,8 @@ pub struct ProcTracker {
     session_seed: u64,
     last_running: Option<u32>,
     last_memory_band: Option<u8>,
+    last_host_ticks: Option<(u64, u64)>,
+    last_net: Option<NetSample>,
     initialized: bool,
 }
 
@@ -114,6 +126,8 @@ impl ProcTracker {
             session_seed,
             last_running: None,
             last_memory_band: None,
+            last_host_ticks: None,
+            last_net: None,
             initialized: false,
         }
     }
@@ -144,6 +158,8 @@ impl ProcTracker {
             self.stats.tracked_processes = self.tracked.len();
             self.last_running = Some(sample.stat.procs_running);
             self.last_memory_band = sample.memory.map(memory_band);
+            self.last_host_ticks = Some((sample.stat.total_cpu_ticks, sample.stat.idle_cpu_ticks));
+            self.last_net = sample.net;
             self.initialized = true;
             return Vec::new();
         }
@@ -344,6 +360,89 @@ impl ProcTracker {
                 ),
             );
         }
+        // Prototype host meter lanes. Gauges carry a 0..1 ratio as magnitude and
+        // are re-emitted every sample so a meter view can hold their level; the
+        // interpretation (ratio vs rate, ceiling) lives in the view-side lane
+        // table, not here.
+        if let Some((last_total, last_idle)) = self.last_host_ticks {
+            let total_delta = monotonic_delta(
+                last_total,
+                sample.stat.total_cpu_ticks,
+                &mut self.stats.counter_resets,
+            );
+            let idle_delta = monotonic_delta(
+                last_idle,
+                sample.stat.idle_cpu_ticks,
+                &mut self.stats.counter_resets,
+            );
+            if total_delta > 0 {
+                let busy =
+                    (1.0 - idle_delta.min(total_delta) as f64 / total_delta as f64).clamp(0.0, 1.0);
+                self.push_event(
+                    &mut events,
+                    host_event(
+                        sample.timestamp,
+                        "host.cpu",
+                        busy,
+                        "busy_percent",
+                        (busy * 100.0).round() as u64,
+                    ),
+                );
+            }
+        }
+        self.last_host_ticks = Some((sample.stat.total_cpu_ticks, sample.stat.idle_cpu_ticks));
+        if let Some(memory) = sample.memory {
+            let used = if memory.total_kib == 0 {
+                0.0
+            } else {
+                (1.0 - memory.available_kib as f64 / memory.total_kib as f64).clamp(0.0, 1.0)
+            };
+            self.push_event(
+                &mut events,
+                host_event(
+                    sample.timestamp,
+                    "host.memory",
+                    used,
+                    "used_percent",
+                    (used * 100.0).round() as u64,
+                ),
+            );
+        }
+        if let (Some(previous), Some(current)) = (self.last_net, sample.net) {
+            let rx_delta = monotonic_delta(
+                previous.rx_bytes,
+                current.rx_bytes,
+                &mut self.stats.counter_resets,
+            );
+            if rx_delta > 0 {
+                let mut event = host_event(
+                    sample.timestamp,
+                    "host.net.rx",
+                    rx_delta.min(MAX_NET_DELTA_BYTES) as f64,
+                    "rx_bytes",
+                    rx_delta,
+                );
+                event.direction = Direction::Inbound;
+                self.push_event(&mut events, event);
+            }
+            let tx_delta = monotonic_delta(
+                previous.tx_bytes,
+                current.tx_bytes,
+                &mut self.stats.counter_resets,
+            );
+            if tx_delta > 0 {
+                let mut event = host_event(
+                    sample.timestamp,
+                    "host.net.tx",
+                    tx_delta.min(MAX_NET_DELTA_BYTES) as f64,
+                    "tx_bytes",
+                    tx_delta,
+                );
+                event.direction = Direction::Outbound;
+                self.push_event(&mut events, event);
+            }
+        }
+        self.last_net = sample.net;
         if self.last_running != Some(sample.stat.procs_running) {
             self.push_event(
                 &mut events,
@@ -611,6 +710,76 @@ pub fn parse_meminfo(input: &str) -> Result<MemorySample, ProcParseError> {
     })
 }
 
+/// One `/proc/net/dev` interface row: name plus cumulative RX/TX byte counters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NetInterfaceSample {
+    pub name: String,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+pub fn parse_net_dev(input: &str) -> Result<Vec<NetInterfaceSample>, ProcParseError> {
+    let mut interfaces = Vec::new();
+    for line in input.lines() {
+        let Some((name, counters)) = line.split_once(':') else {
+            continue;
+        };
+        if interfaces.len() == MAX_NET_INTERFACES {
+            break;
+        }
+        let fields: Vec<&str> = counters.split_ascii_whitespace().collect();
+        // rx_bytes is the first counter column, tx_bytes the ninth.
+        if fields.len() < 16 {
+            return Err(ProcParseError::MissingField("net/dev counters"));
+        }
+        interfaces.push(NetInterfaceSample {
+            name: name.trim().to_owned(),
+            rx_bytes: parse_u64(fields[0])?,
+            tx_bytes: parse_u64(fields[8])?,
+        });
+    }
+    Ok(interfaces)
+}
+
+/// Sum the interfaces the operator selected, or an automatic set: physical
+/// interfaces (those with a backing `device` entry under the sysfs class
+/// directory), excluding loopback; when nothing qualifies as physical (for
+/// example inside a container), fall back to every non-loopback interface.
+pub fn aggregate_net(
+    interfaces: &[NetInterfaceSample],
+    selected: &[String],
+    is_physical: impl Fn(&str) -> bool,
+) -> Option<NetSample> {
+    let chosen: Vec<&NetInterfaceSample> = if selected.is_empty() {
+        let physical: Vec<&NetInterfaceSample> = interfaces
+            .iter()
+            .filter(|interface| interface.name != "lo" && is_physical(&interface.name))
+            .collect();
+        if physical.is_empty() {
+            interfaces
+                .iter()
+                .filter(|interface| interface.name != "lo")
+                .collect()
+        } else {
+            physical
+        }
+    } else {
+        interfaces
+            .iter()
+            .filter(|interface| selected.contains(&interface.name))
+            .collect()
+    };
+    if chosen.is_empty() {
+        return None;
+    }
+    let mut total = NetSample::default();
+    for interface in chosen {
+        total.rx_bytes = total.rx_bytes.saturating_add(interface.rx_bytes);
+        total.tx_bytes = total.tx_bytes.saturating_add(interface.tx_bytes);
+    }
+    Some(total)
+}
+
 fn parse_u64(value: &str) -> Result<u64, ProcParseError> {
     value.parse().map_err(|_| ProcParseError::InvalidNumber)
 }
@@ -630,15 +799,24 @@ pub enum ProcParseError {
 #[cfg(target_os = "linux")]
 pub struct LiveProcSource {
     root: std::path::PathBuf,
+    sys_class_net: std::path::PathBuf,
+    net_interfaces: Vec<String>,
     pid: Option<u32>,
     tracker: ProcTracker,
 }
 
 #[cfg(target_os = "linux")]
 impl LiveProcSource {
-    pub fn new(pid: Option<u32>, anonymize: bool, session_seed: u64) -> Self {
+    pub fn new(
+        pid: Option<u32>,
+        anonymize: bool,
+        session_seed: u64,
+        net_interfaces: Vec<String>,
+    ) -> Self {
         Self {
             root: std::path::PathBuf::from("/proc"),
+            sys_class_net: std::path::PathBuf::from("/sys/class/net"),
+            net_interfaces,
             pid,
             tracker: ProcTracker::new(anonymize, session_seed),
         }
@@ -652,7 +830,9 @@ impl LiveProcSource {
         session_seed: u64,
     ) -> Self {
         Self {
+            sys_class_net: root.join("sys-class-net"),
             root,
+            net_interfaces: Vec::new(),
             pid,
             tracker: ProcTracker::new(anonymize, session_seed),
         }
@@ -671,6 +851,18 @@ impl LiveProcSource {
         match std::fs::read_to_string(&memory_path) {
             Ok(input) => match parse_meminfo(&input) {
                 Ok(memory) => sample.memory = Some(memory),
+                Err(_) => sample.unreadable = sample.unreadable.saturating_add(1),
+            },
+            Err(_) => sample.unreadable = sample.unreadable.saturating_add(1),
+        }
+        let net_path = self.root.join("net/dev");
+        match std::fs::read_to_string(&net_path) {
+            Ok(input) => match parse_net_dev(&input) {
+                Ok(interfaces) => {
+                    sample.net = aggregate_net(&interfaces, &self.net_interfaces, |name| {
+                        self.sys_class_net.join(name).join("device").exists()
+                    });
+                }
                 Err(_) => sample.unreadable = sample.unreadable.saturating_add(1),
             },
             Err(_) => sample.unreadable = sample.unreadable.saturating_add(1),
@@ -846,7 +1038,7 @@ mod tests {
         let categories: BTreeSet<_> = events.iter().map(|event| event.category.as_str()).collect();
         assert_eq!(
             categories,
-            BTreeSet::from(["proc.cpu", "proc.io.read", "proc.io.write"])
+            BTreeSet::from(["proc.cpu", "proc.io.read", "proc.io.write", "host.memory"])
         );
         assert_eq!(
             events
@@ -875,6 +1067,121 @@ mod tests {
     }
 
     #[test]
+    fn host_cpu_gauge_is_a_bounded_busy_ratio_from_tick_deltas() {
+        let mut tracker = ProcTracker::new(false, 7);
+        tracker.ingest(sample(0.0, Vec::new()));
+        let mut busy = sample(0.25, Vec::new());
+        busy.stat.total_cpu_ticks = 10_400;
+        busy.stat.idle_cpu_ticks = 8_100;
+        let events = tracker.ingest(busy);
+        let cpu = events
+            .iter()
+            .find(|event| event.category == "host.cpu")
+            .unwrap();
+        // 400 total ticks, 100 idle -> 75% busy.
+        assert!((cpu.magnitude - 0.75).abs() < 1e-9);
+        assert_eq!(cpu.labels["busy_percent"], "75");
+
+        // A stalled tick counter emits no gauge rather than a fabricated one.
+        let mut stalled = sample(0.5, Vec::new());
+        stalled.stat.total_cpu_ticks = 10_400;
+        stalled.stat.idle_cpu_ticks = 8_100;
+        let events = tracker.ingest(stalled);
+        assert!(events.iter().all(|event| event.category != "host.cpu"));
+    }
+
+    #[test]
+    fn host_memory_gauge_is_continuous_and_distinct_from_pressure() {
+        let mut tracker = ProcTracker::new(false, 7);
+        tracker.ingest(sample(0.0, Vec::new()));
+        let events = tracker.ingest(sample(0.25, Vec::new()));
+        let memory = events
+            .iter()
+            .find(|event| event.category == "host.memory")
+            .unwrap();
+        // Helper sample: 500k of 1000k available -> 50% used.
+        assert!((memory.magnitude - 0.5).abs() < 1e-9);
+        assert!(
+            events
+                .iter()
+                .all(|event| event.category != "host.memory.pressure")
+        );
+    }
+
+    #[test]
+    fn net_deltas_are_directional_and_counter_reset_is_not_wraparound() {
+        let mut tracker = ProcTracker::new(false, 7);
+        let mut first = sample(0.0, Vec::new());
+        first.net = Some(NetSample {
+            rx_bytes: 1_000,
+            tx_bytes: 2_000,
+        });
+        tracker.ingest(first);
+        let mut second = sample(0.25, Vec::new());
+        second.net = Some(NetSample {
+            rx_bytes: 5_000,
+            tx_bytes: 2_500,
+        });
+        let events = tracker.ingest(second);
+        let rx = events
+            .iter()
+            .find(|event| event.category == "host.net.rx")
+            .unwrap();
+        assert_eq!(rx.magnitude, 4_000.0);
+        assert_eq!(rx.direction, Direction::Inbound);
+        let tx = events
+            .iter()
+            .find(|event| event.category == "host.net.tx")
+            .unwrap();
+        assert_eq!(tx.magnitude, 500.0);
+        assert_eq!(tx.direction, Direction::Outbound);
+
+        let mut reset = sample(0.5, Vec::new());
+        reset.net = Some(NetSample {
+            rx_bytes: 10,
+            tx_bytes: 2_600,
+        });
+        let events = tracker.ingest(reset);
+        assert!(events.iter().all(|event| event.category != "host.net.rx"));
+        assert!(events.iter().any(|event| event.category == "host.net.tx"));
+        assert_eq!(tracker.stats().counter_resets, 1);
+    }
+
+    #[test]
+    fn net_dev_parses_and_aggregates_with_physical_preference_and_fallback() {
+        let input = "Inter-|   Receive                                                |  Transmit\n\
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n\
+    lo:  700     10    0    0    0     0          0         0      700      10    0    0    0     0       0          0\n\
+  eth0: 1000    100    0    0    0     0          0         0     2000     200    0    0    0     0       0          0\n\
+ veth1:  111      1    0    0    0     0          0         0      222       2    0    0    0     0       0          0\n";
+        let interfaces = parse_net_dev(input).unwrap();
+        assert_eq!(interfaces.len(), 3);
+        assert_eq!(interfaces[1].name, "eth0");
+        assert_eq!(interfaces[1].rx_bytes, 1_000);
+        assert_eq!(interfaces[1].tx_bytes, 2_000);
+
+        // Physical selection excludes loopback and virtual interfaces.
+        let physical = aggregate_net(&interfaces, &[], |name| name == "eth0").unwrap();
+        assert_eq!(physical.rx_bytes, 1_000);
+        assert_eq!(physical.tx_bytes, 2_000);
+
+        // No physical interface at all -> every non-loopback interface counts.
+        let fallback = aggregate_net(&interfaces, &[], |_| false).unwrap();
+        assert_eq!(fallback.rx_bytes, 1_111);
+        assert_eq!(fallback.tx_bytes, 2_222);
+
+        // An explicit selection wins over auto-detection.
+        let explicit =
+            aggregate_net(&interfaces, &["lo".to_owned()], |name| name == "eth0").unwrap();
+        assert_eq!(explicit.rx_bytes, 700);
+
+        // Selecting only absent interfaces yields no sample, not zeros.
+        assert!(aggregate_net(&interfaces, &["wlan9".to_owned()], |_| true).is_none());
+
+        assert!(parse_net_dev("  eth0: 12 3\n").is_err());
+    }
+
+    #[test]
     fn pid_reuse_emits_exit_and_start_without_counter_spike() {
         let mut tracker = ProcTracker::new(false, 11);
         tracker.ingest(sample(
@@ -885,6 +1192,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
+                .filter(|event| event.category.starts_with("proc."))
                 .map(|event| event.category.as_str())
                 .collect::<Vec<_>>(),
             ["proc.exit", "proc.start"]
@@ -1114,7 +1422,7 @@ mod tests {
                 .iter()
                 .map(|event| event.category.as_str())
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["proc.cpu", "proc.io.read", "proc.io.write"])
+            BTreeSet::from(["proc.cpu", "proc.io.read", "proc.io.write", "host.memory"])
         );
         fs::remove_dir_all(root).unwrap();
     }

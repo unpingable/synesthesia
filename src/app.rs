@@ -129,8 +129,12 @@ pub fn run_proc(args: ProcArgs) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        let source =
-            crate::source::procfs::LiveProcSource::new(args.pid, args.anonymize, session_seed());
+        let source = crate::source::procfs::LiveProcSource::new(
+            args.pid,
+            args.anonymize,
+            session_seed(),
+            args.net_interface.clone(),
+        );
         if args.visual.snapshot || !io::stdout().is_terminal() {
             return snapshot_proc(source, args);
         }
@@ -605,6 +609,7 @@ fn handle_key(
         KeyCode::Char(' ') => state.paused = !state.paused,
         KeyCode::Char('1') => state.view = ViewKind::Weather,
         KeyCode::Char('2') => state.view = ViewKind::Waterfall,
+        KeyCode::Char('3') => state.view = ViewKind::Meter,
         KeyCode::Char('a') if ansi_allowed => {
             state.mode = match state.mode {
                 DisplayMode::Ansi => DisplayMode::Ascii,

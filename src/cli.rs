@@ -125,6 +125,11 @@ pub struct ProcArgs {
     /// Replace process names and PIDs with stable session-local identities.
     #[arg(long)]
     pub anonymize: bool,
+    /// Aggregate network counters over these interfaces only (repeatable).
+    /// Default: physical interfaces, or every non-loopback interface when
+    /// none are detectably physical.
+    #[arg(long = "net-interface", value_name = "NAME")]
+    pub net_interface: Vec<String>,
     /// Save normalized process events as NDJSON.
     #[arg(long)]
     pub record: Option<PathBuf>,
@@ -160,6 +165,7 @@ pub enum ViewKind {
     #[default]
     Weather,
     Waterfall,
+    Meter,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]

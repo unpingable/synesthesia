@@ -48,6 +48,7 @@ pub fn compose(
         match options.view {
             ViewKind::Weather => weather(snapshot, &mut frame, field_height, options),
             ViewKind::Waterfall => waterfall(snapshot, &mut frame, field_height, options),
+            ViewKind::Meter => meter(snapshot, &mut frame, field_height, options),
         }
         if options.particles {
             particle_overlay(snapshot, &mut frame, field_height, options);
@@ -55,10 +56,10 @@ pub fn compose(
     }
     let mut status = if options.help {
         if options.flight.is_some() {
-            " t trigger  x cancel  q/esc cancel-or-finalize  space pause  1/2 view  a mode  c theme  p particles "
+            " t trigger  x cancel  q/esc cancel-or-finalize  space pause  1/2/3 view  a mode  c theme  p particles "
                 .to_owned()
         } else {
-            " q/esc quit  space pause  1 weather  2 waterfall  a ascii/ansi  c theme  p particles  +/- gain  [] decay "
+            " q/esc quit  space pause  1 weather  2 waterfall  3 meter  a ascii/ansi  c theme  p particles  +/- gain  [] decay "
                 .to_owned()
         }
     } else if let Some(tcp) = &snapshot.metrics.tcp {
@@ -328,6 +329,7 @@ fn short_view(view: ViewKind) -> &'static str {
     match view {
         ViewKind::Weather => "w",
         ViewKind::Waterfall => "f",
+        ViewKind::Meter => "m",
     }
 }
 
@@ -692,6 +694,280 @@ fn waterfall(
                 i32::from(y).saturating_sub(1),
                 visual_cell(intensity * 0.65, category, activity.direction, options.mode),
             );
+        }
+    }
+}
+
+/// Prototype lane contract for the meter view. The temporal model deliberately
+/// retains category hashes, not strings, so interpretation (label, gauge vs
+/// rate, full-scale ceiling) lives here with the consumer, keyed by stable
+/// hash — the same move as `tcp_visual`. Gauges carry a 0..1 ratio in event
+/// magnitude; rate lanes carry per-sample byte deltas and are normalized by a
+/// fixed prototype ceiling (calibrated-ish; discovery/config comes later).
+struct MeterLane {
+    category: &'static str,
+    label: &'static str,
+    gauge: bool,
+    ceiling: f64,
+    direction: Direction,
+}
+
+const METER_LANES: &[MeterLane] = &[
+    MeterLane {
+        category: "host.cpu",
+        label: "cpu",
+        gauge: true,
+        ceiling: 1.0,
+        direction: Direction::Neutral,
+    },
+    MeterLane {
+        category: "host.memory",
+        label: "mem",
+        gauge: true,
+        ceiling: 1.0,
+        direction: Direction::Neutral,
+    },
+    MeterLane {
+        category: "host.net.rx",
+        label: "net rx",
+        gauge: false,
+        ceiling: 125_000_000.0,
+        direction: Direction::Inbound,
+    },
+    MeterLane {
+        category: "host.net.tx",
+        label: "net tx",
+        gauge: false,
+        ceiling: 125_000_000.0,
+        direction: Direction::Outbound,
+    },
+    MeterLane {
+        category: "proc.io.read",
+        label: "dsk r",
+        gauge: false,
+        ceiling: 512.0 * 1024.0 * 1024.0,
+        direction: Direction::Inbound,
+    },
+    MeterLane {
+        category: "proc.io.write",
+        label: "dsk w",
+        gauge: false,
+        ceiling: 512.0 * 1024.0 * 1024.0,
+        direction: Direction::Outbound,
+    },
+];
+
+const METER_GAUGE_HOLD_SECONDS: f64 = 0.6;
+const METER_GAUGE_RELEASE_SECONDS: f64 = 1.2;
+
+struct MeterBar {
+    label: String,
+    level: f64,
+    peak: f64,
+    category: u64,
+    direction: Direction,
+}
+
+fn meter(
+    snapshot: &ModelSnapshot,
+    frame: &mut RenderFrame,
+    field_height: u16,
+    options: &ViewOptions,
+) {
+    let retention = snapshot.decay_seconds * 2.5;
+    let interval = options
+        .proc
+        .map(|proc| proc.interval_ms as f64 / 1_000.0)
+        .filter(|seconds| *seconds > 0.0)
+        .unwrap_or(0.25);
+    let window = (interval * 2.5).clamp(1.0_f64.min(retention), retention.max(0.25));
+    let hashes: Vec<u64> = METER_LANES
+        .iter()
+        .map(|lane| stable_hash(lane.category.as_bytes()))
+        .collect();
+    let hold = (interval * 2.0).max(METER_GAUGE_HOLD_SECONDS);
+    let mut levels = vec![0.0_f64; METER_LANES.len()];
+    let mut rate_sums = vec![0.0_f64; METER_LANES.len()];
+    let mut peaks = vec![0.0_f64; METER_LANES.len()];
+    let mut matched = false;
+    for activity in &snapshot.activity {
+        let age = (snapshot.now - activity.born).max(0.0);
+        if age > retention {
+            continue;
+        }
+        let Some(index) = hashes.iter().position(|hash| *hash == activity.category) else {
+            continue;
+        };
+        matched = true;
+        let lane = &METER_LANES[index];
+        if lane.gauge {
+            // Instant attack: the newest sample holds at full value; older
+            // samples release linearly, all derived from timestamped snapshot
+            // history — no hidden view state.
+            let value = (activity.magnitude / lane.ceiling).clamp(0.0, 1.0);
+            let envelope = if age <= hold {
+                1.0
+            } else {
+                (1.0 - (age - hold) / METER_GAUGE_RELEASE_SECONDS).max(0.0)
+            };
+            levels[index] = levels[index].max(value * envelope);
+            peaks[index] = peaks[index].max(value);
+        } else {
+            if age <= window {
+                rate_sums[index] += activity.magnitude;
+            }
+            // Approximate instantaneous rate for the retention-bounded peak.
+            peaks[index] = peaks[index].max((activity.magnitude / interval) / lane.ceiling);
+        }
+    }
+    if !matched {
+        meter_generic(snapshot, frame, field_height, options);
+        return;
+    }
+    let bars: Vec<MeterBar> = METER_LANES
+        .iter()
+        .enumerate()
+        .map(|(index, lane)| MeterBar {
+            label: lane.label.to_owned(),
+            level: if lane.gauge {
+                levels[index]
+            } else {
+                (rate_sums[index] / window / lane.ceiling).clamp(0.0, 1.0)
+            },
+            peak: peaks[index].clamp(0.0, 1.0),
+            category: hashes[index],
+            direction: lane.direction,
+        })
+        .collect();
+    draw_bars(frame, field_height, &bars, options.mode);
+}
+
+/// Fallback for sources with no known meter lanes: relative "loudness" bars
+/// bucketed by category hash, normalized to the loudest bucket. Explicitly a
+/// music-visualizer scale, not a calibrated one.
+fn meter_generic(
+    snapshot: &ModelSnapshot,
+    frame: &mut RenderFrame,
+    field_height: u16,
+    options: &ViewOptions,
+) {
+    let retention = snapshot.decay_seconds * 2.5;
+    let window = 1.0_f64.min(retention.max(0.25));
+    let buckets = usize::from((frame.width / 8).clamp(4, 16));
+    let mut sums = vec![0.0_f64; buckets];
+    let mut categories = vec![0_u64; buckets];
+    let mut directions = vec![Direction::Unknown; buckets];
+    for activity in &snapshot.activity {
+        let age = (snapshot.now - activity.born).max(0.0);
+        if age > window {
+            continue;
+        }
+        let index = (activity.category % buckets as u64) as usize;
+        sums[index] += activity.magnitude;
+        categories[index] = activity.category;
+        directions[index] = activity.direction;
+    }
+    let loudest = sums.iter().cloned().fold(0.0_f64, f64::max);
+    if loudest <= 0.0 {
+        return;
+    }
+    let bars: Vec<MeterBar> = (0..buckets)
+        .map(|index| MeterBar {
+            label: format!("{index:x}"),
+            level: ((sums[index] / loudest) * f64::from(options.gain)).clamp(0.0, 1.0),
+            peak: 0.0,
+            category: if categories[index] == 0 {
+                index as u64
+            } else {
+                categories[index]
+            },
+            direction: directions[index],
+        })
+        .collect();
+    draw_bars(frame, field_height, &bars, options.mode);
+}
+
+fn draw_bars(frame: &mut RenderFrame, field_height: u16, bars: &[MeterBar], mode: DisplayMode) {
+    if bars.is_empty() || frame.width == 0 || field_height == 0 {
+        return;
+    }
+    let label_row = field_height >= 3;
+    let bar_rows = if label_row {
+        field_height - 1
+    } else {
+        field_height
+    };
+    let columns = bars.len() as u16;
+    let column_width = (frame.width / columns).max(1);
+    let start_x = (frame.width.saturating_sub(column_width * columns)) / 2;
+    for (index, bar) in bars.iter().enumerate() {
+        let column_x = i32::from(start_x) + i32::from(column_width) * index as i32;
+        let bar_width = i32::from(column_width.saturating_sub(2).clamp(1, 8));
+        let bar_x = column_x + (i32::from(column_width) - bar_width) / 2;
+        let level_rows = (bar.level.clamp(0.0, 1.0) * f64::from(bar_rows)).round() as i32;
+        for row in 0..level_rows {
+            let y = i32::from(bar_rows) - 1 - row;
+            let intensity = 0.3 + 0.65 * (row + 1) as f32 / f32::from(bar_rows);
+            for x in bar_x..bar_x + bar_width {
+                frame.put(
+                    x,
+                    y,
+                    visual_cell(intensity, bar.category, bar.direction, mode),
+                );
+            }
+        }
+        if level_rows == 0 {
+            for x in bar_x..bar_x + bar_width {
+                frame.put(
+                    x,
+                    i32::from(bar_rows) - 1,
+                    Cell {
+                        glyph: match mode {
+                            DisplayMode::Ascii => '.',
+                            DisplayMode::Ansi => '·',
+                        },
+                        intensity: 0.15,
+                        category: bar.category,
+                        direction: bar.direction,
+                    },
+                );
+            }
+        }
+        let peak_rows = (bar.peak.clamp(0.0, 1.0) * f64::from(bar_rows)).round() as i32;
+        if peak_rows > level_rows && peak_rows >= 1 {
+            let y = i32::from(bar_rows) - peak_rows;
+            for x in bar_x..bar_x + bar_width {
+                frame.put(
+                    x,
+                    y,
+                    Cell {
+                        glyph: match mode {
+                            DisplayMode::Ascii => '-',
+                            DisplayMode::Ansi => '─',
+                        },
+                        intensity: 0.85,
+                        category: bar.category,
+                        direction: bar.direction,
+                    },
+                );
+            }
+        }
+        if label_row {
+            let label: String = bar.label.chars().take(usize::from(column_width)).collect();
+            let label_x = column_x
+                + (i32::from(column_width) - i32::try_from(label.chars().count()).unwrap_or(0)) / 2;
+            for (offset, glyph) in label.chars().enumerate() {
+                frame.put(
+                    label_x + offset as i32,
+                    i32::from(field_height) - 1,
+                    Cell {
+                        glyph,
+                        intensity: 0.45,
+                        category: bar.category,
+                        direction: Direction::Neutral,
+                    },
+                );
+            }
         }
     }
 }
@@ -1195,6 +1471,136 @@ mod tests {
         assert!(differing >= 8);
         assert!(ascii.plain_text().is_ascii());
         assert!(!ascii.plain_text().contains('\x1b'));
+    }
+
+    fn meter_event(category: &str, magnitude: f64, direction: Direction) -> NormalizedEvent {
+        NormalizedEvent {
+            v: 1,
+            timestamp: None,
+            category: category.to_owned(),
+            origin: Some("host".to_owned()),
+            target: None,
+            magnitude,
+            direction,
+            labels: std::collections::BTreeMap::from([(
+                "synesthesia.lane".to_owned(),
+                category.to_owned(),
+            )]),
+        }
+    }
+
+    #[test]
+    fn meter_lanes_render_labeled_calibrated_ascii_bars_deterministically() {
+        let mut model = TemporalModel::default();
+        model.ingest(meter_event("host.cpu", 0.8, Direction::Neutral), 0.1);
+        model.ingest(meter_event("host.memory", 0.5, Direction::Neutral), 0.1);
+        model.ingest(
+            meter_event("host.net.rx", 20_000_000.0, Direction::Inbound),
+            0.1,
+        );
+        model.advance(0.2);
+        let snapshot = model.snapshot();
+        let render = || {
+            compose(
+                &snapshot,
+                100,
+                30,
+                &options(ViewKind::Meter, DisplayMode::Ascii),
+            )
+            .plain_text()
+        };
+        let first = render();
+        assert_eq!(first, render());
+        assert!(first.is_ascii());
+        assert!(!first.contains('\x1b'));
+        for label in ["cpu", "mem", "net rx", "net tx", "dsk r", "dsk w"] {
+            assert!(first.contains(label), "missing lane label {label}");
+        }
+
+        let mut busier = TemporalModel::default();
+        busier.ingest(meter_event("host.cpu", 0.2, Direction::Neutral), 0.1);
+        busier.ingest(meter_event("host.memory", 0.5, Direction::Neutral), 0.1);
+        busier.ingest(
+            meter_event("host.net.rx", 20_000_000.0, Direction::Inbound),
+            0.1,
+        );
+        busier.advance(0.2);
+        let lower = compose(
+            &busier.snapshot(),
+            100,
+            30,
+            &options(ViewKind::Meter, DisplayMode::Ascii),
+        )
+        .plain_text();
+        assert_ne!(first, lower);
+    }
+
+    #[test]
+    fn meter_peak_cap_outlives_a_dropped_level_within_retention() {
+        let mut spiked = TemporalModel::default();
+        spiked.ingest(meter_event("host.cpu", 0.9, Direction::Neutral), 0.0);
+        spiked.ingest(meter_event("host.cpu", 0.1, Direction::Neutral), 2.0);
+        spiked.advance(2.5);
+
+        let mut quiet = TemporalModel::default();
+        quiet.ingest(meter_event("host.cpu", 0.1, Direction::Neutral), 2.0);
+        quiet.advance(2.5);
+
+        let mut view_options = options(ViewKind::Meter, DisplayMode::Ascii);
+        view_options.particles = false;
+        let with_peak = compose(&spiked.snapshot(), 100, 30, &view_options).plain_text();
+        let without_peak = compose(&quiet.snapshot(), 100, 30, &view_options).plain_text();
+        assert_ne!(with_peak, without_peak);
+        // The spike sample is old enough that its level released, so the
+        // difference above the resting bar can only be the peak cap marker.
+        let upper_with: String = with_peak.lines().take(10).collect();
+        let upper_without: String = without_peak.lines().take(10).collect();
+        assert!(upper_with.contains('-'));
+        assert!(!upper_without.contains('-'));
+    }
+
+    #[test]
+    fn meter_falls_back_to_relative_bars_for_unknown_categories() {
+        let snapshot = snapshot();
+        let render = || {
+            compose(
+                &snapshot,
+                100,
+                30,
+                &options(ViewKind::Meter, DisplayMode::Ascii),
+            )
+            .plain_text()
+        };
+        let first = render();
+        assert_eq!(first, render());
+        assert!(first.is_ascii());
+        let field: String = first.lines().take(29).collect();
+        assert!(field.chars().any(|glyph| glyph != ' '));
+        let weather = compose(
+            &snapshot,
+            100,
+            30,
+            &options(ViewKind::Weather, DisplayMode::Ascii),
+        )
+        .plain_text();
+        assert_ne!(first, weather);
+    }
+
+    #[test]
+    fn meter_terminal_size_edges_do_not_panic() {
+        let mut model = TemporalModel::default();
+        model.ingest(meter_event("host.cpu", 0.8, Direction::Neutral), 0.1);
+        model.advance(0.2);
+        let snapshot = model.snapshot();
+        for (width, height) in [(1, 1), (2, 1), (1, 2), (10, 3), (6, 2), (100, 30)] {
+            let frame = compose(
+                &snapshot,
+                width,
+                height,
+                &options(ViewKind::Meter, DisplayMode::Ascii),
+            );
+            assert_eq!(frame.cells.len(), usize::from(width) * usize::from(height));
+        }
     }
 
     #[test]

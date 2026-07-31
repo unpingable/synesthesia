@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-07-31
 
 - Add continuous host CPU and memory ratio gauges and directional
   `/proc/net/dev` byte deltas to unprivileged process mode, with

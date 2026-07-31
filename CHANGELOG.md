@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Add continuous host CPU and memory ratio gauges and directional
+  `/proc/net/dev` byte deltas to unprivileged process mode, with
+  physical-interface auto-selection and a repeatable `--net-interface`
+  override.
+- Add a calibrated `meter` equalizer view (`--view meter`, key `3`) with a
+  stable six-lane contract, sample-and-hold gauges, covered-duration rates,
+  retention-bounded peak caps, and clip markers, externally reviewed with
+  findings locked in as regression tests.
+- Add perceptual square-root rate-lane projection with a
+  `--meter-scale linear` opt-in and status-line disclosure of projection and
+  non-neutral gain.
+- Add `rainbow` and `pastel` themes with hash-stable lane hues, theme aliases
+  `matrix`/`ice`/`mono`, and an xterm-256 color tier between truecolor and
+  named 16-color.
+- Fix a cold-theme inbound blue-channel overflow that panicked debug builds
+  at full intensity.
+
 ## 0.2.1 - 2026-07-26
 
 - Add a read-only `doctor` with schema-v1 JSON, conservative terminal/procfs/

@@ -113,16 +113,32 @@ cargo run --release -- proc
 
 Process mode samples Linux `/proc` every 250 ms. It turns per-process CPU
 deltas, readable storage-I/O deltas, process birth/exit, runqueue changes, and
-low-available-memory observations into ordinary normalized events. Stable
-process identities develop stable regions; CPU load sustains motion, reads and
-writes move in opposite directions, and process churn arrives as a brief
-front. No root, BTF, eBPF, tshark, daemon, or service is required.
+low-available-memory observations into ordinary normalized events, plus
+continuous host CPU/memory ratios and directional network byte deltas for the
+meter view. Stable process identities develop stable regions; CPU load
+sustains motion, reads and writes move in opposite directions, and process
+churn arrives as a brief front. No root, BTF, eBPF, tshark, daemon, or
+service is required.
 
-The source reads `/proc/stat`, `/proc/meminfo`, `/proc/<pid>/stat`, and readable
-`/proc/<pid>/io`. It does not read command-line arguments, environments,
-working directories, executable paths, open files, cgroup paths, usernames,
-or process memory. Recordings contain bounded process names and PIDs by
-default; use `--anonymize` for stable session-local opaque identities:
+For the classic equalizer:
+
+```sh
+./synesthesia proc --view meter
+```
+
+Six calibrated lanes — CPU, memory, network RX/TX, and accounted process
+read/write — with instant attack, honest decay, and peak caps that persist
+only as long as the samples that justify them. Network aggregation prefers
+physical interfaces and accepts a repeatable `--net-interface NAME`
+override.
+
+The source reads `/proc/stat`, `/proc/meminfo`, `/proc/net/dev`,
+`/proc/<pid>/stat`, and readable `/proc/<pid>/io`, and checks only the
+existence of `/sys/class/net/<name>/device` to classify interfaces. It does
+not read command-line arguments, environments, working directories,
+executable paths, open files, cgroup paths, usernames, or process memory.
+Recordings contain bounded process names and PIDs by default; use
+`--anonymize` for stable session-local opaque identities:
 
 ```sh
 ./synesthesia proc --anonymize --record proc-session.ndjson
@@ -330,15 +346,22 @@ records are capped at 64 KiB. Replay preserves timestamp deltas, scaled by
 ## Views and controls
 
 `weather` is a moving two-dimensional flow field. `waterfall` rolls real event
-history through category and stable-flow bands. Both accept `--mode ascii` or
-`--mode ansi` and one of `phosphor`, `amber`, `cold`, or `monochrome` via
-`--theme`.
+history through category and stable-flow bands. `meter` is a calibrated
+equalizer over stable host lanes; rate lanes project perceptually
+(square-root) by default so ordinary desktop traffic stays visible while
+saturation still means saturation, and `--meter-scale linear` restores
+literal capacity comparison. A pinned bar carries a clip marker and the
+status line names the projection. All views accept `--mode ascii` or
+`--mode ansi` and one of `phosphor`, `amber`, `cold`, `monochrome`,
+`rainbow`, or `pastel` via `--theme` (aliases `matrix`, `ice`, `mono`).
+Colors degrade truecolor → 256-color → named 16-color with the terminal.
 
-`q`/Escape quits, Space pauses, `1`/`2` selects a view, `a` toggles rendering,
-`c` changes theme, `p` toggles event-driven particles, `+`/`-` changes gain,
-`[`/`]` changes persistence, and `h`/`?` shows help. `--particles off`
-preserves the field without the ember layer. While a flight recorder is armed,
-`t` triggers manually and `x` cancels without writing.
+`q`/Escape quits, Space pauses, `1`/`2`/`3` selects a view, `a` toggles
+rendering, `c` changes theme, `p` toggles event-driven particles, `+`/`-`
+changes gain, `[`/`]` changes persistence, and `h`/`?` shows help.
+`--particles off` preserves the field without the ember layer. While a
+flight recorder is armed, `t` triggers manually and `x` cancels without
+writing.
 
 For plain, deterministic output:
 

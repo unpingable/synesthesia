@@ -86,7 +86,9 @@ docs/demo.gif        Real generated terminal recording
    never move historical retention into a privileged collector.
 10. Particles are bounded semantic-event consequences, never source-independent
     decoration. Disabling them must leave the underlying field unchanged.
-11. Process mode reads only the documented narrow `/proc` files. Do not add
+11. Process mode reads only the documented narrow `/proc` files —
+    `/proc/stat`, `/proc/meminfo`, `/proc/net/dev`, and per-PID `stat`/`io` —
+    plus an existence check on `/sys/class/net/<name>/device`. Do not add
     arguments, environments, paths, usernames, process memory, or an unbounded
     task table.
 12. Shell completions and the option-bearing parts of the man page are

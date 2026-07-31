@@ -7,7 +7,7 @@ temporal sculpture.
 ```text
 source reader -> NormalizedEvent -> bounded channel -> TemporalModel
                                                     -> ModelSnapshot
-                                                    -> weather | waterfall
+                                                    -> weather | waterfall | meter
                                                     -> RenderFrame
                                                     -> plain text | Ratatui
 ```
@@ -46,6 +46,36 @@ Event age maps to the horizontal time axis. A blend of category and flow hashes
 selects rows. Magnitude controls density and heavy-event thickness. It is a
 projection of retained history, with no random decoration.
 
+## Meter
+
+The meter is an equalizer projection over six host lanes. The model
+deliberately retains category hashes rather than strings, so lane
+interpretation lives in a view-side contract table keyed by stable hash —
+the same move as the TCP pathology glyph table. Each entry declares label,
+gauge-versus-rate aggregation, a full-scale ceiling, and direction. Sources
+emit documented categories; the view owns the meaning it is authorized to
+read; unknown-category sources fall back to relative hash-bucket bars.
+
+Gauges (CPU, memory) are sample-and-hold: the newest observation stands
+verbatim until stale, judged against the observed sample cadence, then
+decays. Rates (network, accounted process I/O) divide summed deltas by the
+actually covered duration derived from event timestamps, and peak caps
+divide each delta by its own inter-arrival gap. The configured sampler
+interval is never a time base, so stalls, jitter, and replay speed do not
+distort apparent throughput. Every level is a pure function of the immutable
+snapshot; peak caps persist exactly as long as the samples that justify
+them.
+
+Rate-lane bar heights project through `sqrt(rate/ceiling)` by default so
+workstation-scale traffic reads against capacity-scale ceilings while
+saturation still means saturation; `--meter-scale linear` is the literal
+alternative. Both are fixed pure functions — the same rate always draws the
+same height. A pinned bar carries a clip marker meaning the true rate
+exceeded the real ceiling in either mode, and the status line names the
+projection and any non-neutral gain. Gauges are always linear and take no
+gain. Labels claim only what is measured: accounted per-process I/O is
+`proc r`/`proc w`, not disk throughput.
+
 ## Event-driven particles
 
 Particles are a second immutable-snapshot projection, not a change to field
@@ -68,7 +98,7 @@ The unprivileged process source is a monotonic sampler downstream of a narrow
 procfs reader:
 
 ```text
-/proc/stat + /proc/meminfo + /proc/<pid>/{stat,io}
+/proc/stat + /proc/meminfo + /proc/net/dev + /proc/<pid>/{stat,io}
   -> bounded ProcSample -> bounded ProcTracker
   -> NormalizedEvent -> ordinary renderer channel
 ```
@@ -80,6 +110,19 @@ become directional `proc.io.read` and `proc.io.write`; counter regression is
 treated as reset, not wraparound magnitude. Process birth/exit, changes in
 `procs_running`, and coarse low-`MemAvailable` bands are observations rather
 than diagnoses.
+
+Host meter lanes ride the same sampler. `host.cpu` and `host.memory` carry a
+0..1 ratio each sample; a stalled tick counter emits nothing rather than a
+fabricated gauge. `/proc/net/dev` byte counters become directional
+`host.net.rx` and `host.net.tx` deltas, clamped once so magnitude and label
+agree, with per-line fault isolation so one malformed row cannot discard the
+readable interfaces around it. Aggregation covers physical interfaces —
+those with a `device` entry under `/sys/class/net`, an existence check only —
+excluding loopback, falling back to every non-loopback interface when
+nothing is detectably physical, or exactly the repeatable `--net-interface`
+selection; explicitly selected names absent from a sample are counted, never
+silently narrowed. Host, network, and process counter resets keep separate
+diagnostic counters.
 
 A scan holds at most 8,192 process records, tracks at most 4,096 identities,
 and emits at most 8,192 semantic events. When tracking is full, already-known

@@ -413,6 +413,7 @@ fn print_snapshot(
     let options = ViewOptions {
         mode: visual.mode,
         view: visual.view,
+        meter_scale: visual.meter_scale,
         gain: 1.0,
         paused: false,
         malformed,
@@ -498,6 +499,7 @@ fn run_interactive(
             let options = ViewOptions {
                 mode: state.mode,
                 view: state.view,
+                meter_scale: visual.meter_scale,
                 gain: state.gain,
                 paused: state.paused,
                 malformed: producer_stats.malformed.load(Ordering::Relaxed),
@@ -946,6 +948,7 @@ mod tests {
         let options = ViewOptions {
             mode: DisplayMode::Ascii,
             view: ViewKind::Weather,
+            meter_scale: crate::cli::MeterScale::Perceptual,
             gain: 1.0,
             paused: false,
             malformed: 0,

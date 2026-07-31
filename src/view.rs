@@ -1,5 +1,5 @@
 use crate::{
-    cli::{DisplayMode, ViewKind},
+    cli::{DisplayMode, MeterScale, ViewKind},
     event::Direction,
     flight_recorder::{FlightState, FlightStatus},
     model::{Activity, ModelSnapshot, Particle, ParticleStyle, ProcMetrics, TcpMetrics},
@@ -14,6 +14,7 @@ const ANSI_DENSITY: &[char] = &[' ', '·', '░', '▒', '▓', '█'];
 pub struct ViewOptions {
     pub mode: DisplayMode,
     pub view: ViewKind,
+    pub meter_scale: MeterScale,
     pub gain: f32,
     pub paused: bool,
     pub malformed: u64,
@@ -84,6 +85,18 @@ pub fn compose(
         )
         .to_lowercase()
     };
+    if options.view == ViewKind::Meter && !options.help {
+        // Name the rate-lane projection so a bar height is never mistaken
+        // for a calibrated linear reading; add the gain only when it is not
+        // neutral.
+        status.push_str(match options.meter_scale {
+            MeterScale::Perceptual => " rate sqrt",
+            MeterScale::Linear => " rate lin",
+        });
+        if (options.gain - 1.0).abs() > 0.01 {
+            status.push_str(&format!(" x{:.1}", options.gain));
+        }
+    }
     if let Some(flight) = &options.flight {
         status = format!(" {} |{}", flight_status(flight), status);
     } else if let Some(flight) = &snapshot.metrics.flight {
@@ -771,6 +784,7 @@ struct MeterBar {
     label: String,
     level: f64,
     peak: f64,
+    clipped: bool,
     category: u64,
     direction: Direction,
 }
@@ -781,7 +795,7 @@ fn meter(
     field_height: u16,
     options: &ViewOptions,
 ) {
-    match meter_bars(snapshot) {
+    match meter_bars(snapshot, f64::from(options.gain), options.meter_scale) {
         Some(bars) => draw_bars(frame, field_height, &bars, options.mode),
         None => meter_generic(snapshot, frame, field_height, options),
     }
@@ -791,7 +805,19 @@ fn meter(
 /// None when no known lane has any retained sample, so the caller can fall
 /// back to the generic relative view. All time bases are event timestamps;
 /// the configured sampler interval is never used as a denominator.
-fn meter_bars(snapshot: &ModelSnapshot) -> Option<Vec<MeterBar>> {
+///
+/// `rate_gain` (the user's +/- control) scales rate-lane values before the
+/// `scale` projection maps them to bar height: perceptual takes the square
+/// root — 1% of ceiling reads as a 10% bar, 25% as half height, saturation as
+/// saturation — while linear is literal. Both are fixed pure functions, so
+/// the same rate always draws the same height. A bar past full scale is
+/// flagged clipped; since sqrt(x) > 1 iff x > 1, clipped means the true rate
+/// exceeded the real ceiling in either mode. Gauge lanes ignore both knobs.
+fn meter_bars(
+    snapshot: &ModelSnapshot,
+    rate_gain: f64,
+    scale: MeterScale,
+) -> Option<Vec<MeterBar>> {
     let retention = snapshot.decay_seconds * 2.5;
     let hashes: Vec<u64> = METER_LANES
         .iter()
@@ -827,15 +853,19 @@ fn meter_bars(snapshot: &ModelSnapshot) -> Option<Vec<MeterBar>> {
                             .fold(0.0, f64::max),
                     )
                 } else {
-                    (
-                        rate_level(lane_samples, snapshot.now) / lane.ceiling,
-                        rate_peak(lane_samples) / lane.ceiling,
-                    )
+                    let raw_level =
+                        rate_level(lane_samples, snapshot.now) / lane.ceiling * rate_gain.max(0.0);
+                    let raw_peak = rate_peak(lane_samples) / lane.ceiling * rate_gain.max(0.0);
+                    match scale {
+                        MeterScale::Perceptual => (raw_level.sqrt(), raw_peak.sqrt()),
+                        MeterScale::Linear => (raw_level, raw_peak),
+                    }
                 };
                 MeterBar {
                     label: lane.label.to_owned(),
                     level: level.clamp(0.0, 1.0),
                     peak: peak.clamp(0.0, 1.0),
+                    clipped: !lane.gauge && level > 1.0,
                     category: hashes[index],
                     direction: lane.direction,
                 }
@@ -952,6 +982,7 @@ fn meter_generic(
             label: format!("{index:x}"),
             level: ((sums[index] / loudest) * f64::from(options.gain)).clamp(0.0, 1.0),
             peak: 0.0,
+            clipped: false,
             category: categories[index].unwrap_or(index as u64),
             direction: directions[index],
         })
@@ -999,6 +1030,25 @@ fn draw_bars(frame: &mut RenderFrame, field_height: u16, bars: &[MeterBar], mode
                             DisplayMode::Ansi => '·',
                         },
                         intensity: 0.15,
+                        category: bar.category,
+                        direction: bar.direction,
+                    },
+                );
+            }
+        }
+        if bar.clipped {
+            // The bar is pinned past the display ceiling; say so rather than
+            // letting a full bar read as "exactly at ceiling".
+            for x in bar_x..bar_x + bar_width {
+                frame.put(
+                    x,
+                    0,
+                    Cell {
+                        glyph: match mode {
+                            DisplayMode::Ascii => '^',
+                            DisplayMode::Ansi => '▲',
+                        },
+                        intensity: 0.95,
                         category: bar.category,
                         direction: bar.direction,
                     },
@@ -1130,6 +1180,7 @@ mod tests {
         ViewOptions {
             mode,
             view,
+            meter_scale: MeterScale::Perceptual,
             gain: 1.0,
             paused: false,
             malformed: 0,
@@ -1696,6 +1747,103 @@ mod tests {
         let rate = rate_level(&samples, 3.0);
         // 250 units per 0.25s -> 1000 units/s.
         assert!((rate - 1_000.0).abs() < 150.0, "rate was {rate}");
+    }
+
+    #[test]
+    fn perceptual_projection_is_sqrt_linear_is_literal_and_both_share_clipping() {
+        let mut model = TemporalModel::default();
+        model.ingest(meter_event("host.cpu", 0.5, Direction::Neutral), 0.1);
+        // One lone 31.25 MB sample reads as 31.25 MB/s: exactly 25% of the
+        // 125 MB/s (1 Gbit/s) ceiling.
+        model.ingest(
+            meter_event("host.net.rx", 31_250_000.0, Direction::Inbound),
+            0.1,
+        );
+        model.advance(0.2);
+        let snapshot = model.snapshot();
+
+        let perceptual = meter_bars(&snapshot, 1.0, MeterScale::Perceptual).unwrap();
+        let linear = meter_bars(&snapshot, 1.0, MeterScale::Linear).unwrap();
+        // 25% of ceiling: half-height bar perceptually, quarter-height linearly.
+        assert!((perceptual[2].level - 0.5).abs() < 0.01);
+        assert!((linear[2].level - 0.25).abs() < 0.01);
+        assert!(!perceptual[2].clipped && !linear[2].clipped);
+
+        // Gauges are always linear and ignore gain and scale mode alike.
+        assert_eq!(perceptual[0].level, 0.5);
+        assert_eq!(linear[0].level, 0.5);
+        assert_eq!(
+            meter_bars(&snapshot, 4.0, MeterScale::Perceptual).unwrap()[0].level,
+            0.5
+        );
+
+        // Same rate, same height: the projection is a fixed pure function.
+        assert_eq!(
+            meter_bars(&snapshot, 1.0, MeterScale::Perceptual).unwrap()[2].level,
+            perceptual[2].level
+        );
+    }
+
+    #[test]
+    fn clipping_means_the_true_rate_exceeded_the_real_ceiling_in_both_modes() {
+        let mut model = TemporalModel::default();
+        // 200 MB/s against a 125 MB/s ceiling: over capacity, both modes.
+        model.ingest(
+            meter_event("host.net.rx", 200_000_000.0, Direction::Inbound),
+            0.1,
+        );
+        model.advance(0.2);
+        let snapshot = model.snapshot();
+        for scale in [MeterScale::Perceptual, MeterScale::Linear] {
+            let bars = meter_bars(&snapshot, 1.0, scale).unwrap();
+            assert!(bars[2].clipped, "{scale:?} should clip");
+            assert_eq!(bars[2].level, 1.0);
+        }
+        // Under-ceiling traffic never clips perceptually even though sqrt
+        // raises the bar height.
+        let mut modest = TemporalModel::default();
+        modest.ingest(
+            meter_event("host.net.rx", 90_000_000.0, Direction::Inbound),
+            0.1,
+        );
+        modest.advance(0.2);
+        let bars = meter_bars(&modest.snapshot(), 1.0, MeterScale::Perceptual).unwrap();
+        assert!(!bars[2].clipped);
+        assert!(bars[2].level > 0.8 && bars[2].level < 1.0);
+
+        // The clip marker is visible at the top of a pinned lane.
+        let frame = compose(
+            &snapshot,
+            100,
+            30,
+            &options(ViewKind::Meter, DisplayMode::Ascii),
+        )
+        .plain_text();
+        assert!(frame.lines().next().unwrap().contains('^'));
+    }
+
+    #[test]
+    fn meter_status_names_projection_and_only_non_neutral_gain() {
+        let mut model = TemporalModel::default();
+        model.ingest(meter_event("host.cpu", 0.5, Direction::Neutral), 0.1);
+        model.advance(0.2);
+        let render = |scale: MeterScale, gain: f32, view: ViewKind| {
+            let mut view_options = options(view, DisplayMode::Ascii);
+            view_options.meter_scale = scale;
+            view_options.gain = gain;
+            compose(&model.snapshot(), 100, 30, &view_options)
+                .plain_text()
+                .lines()
+                .last()
+                .unwrap()
+                .to_owned()
+        };
+        let neutral = render(MeterScale::Perceptual, 1.0, ViewKind::Meter);
+        assert!(neutral.contains("rate sqrt"));
+        assert!(!neutral.contains(" x1.0"));
+        assert!(render(MeterScale::Linear, 1.0, ViewKind::Meter).contains("rate lin"));
+        assert!(render(MeterScale::Perceptual, 2.0, ViewKind::Meter).contains("rate sqrt x2.0"));
+        assert!(!render(MeterScale::Perceptual, 1.0, ViewKind::Weather).contains("rate sqrt"));
     }
 
     #[test]

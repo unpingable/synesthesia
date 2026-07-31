@@ -189,6 +189,18 @@ pub enum ParticleMode {
     Off,
 }
 
+/// How rate-lane magnitudes project to bar height in the meter view.
+/// Perceptual (square root) keeps workstation-scale traffic visible against
+/// capacity-scale ceilings while saturation still means saturation; linear is
+/// literal capacity comparison. Same rate always yields the same height in
+/// both. Gauge lanes are always linear.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum MeterScale {
+    #[default]
+    Perceptual,
+    Linear,
+}
+
 #[derive(Clone, Debug, Args)]
 pub struct VisualArgs {
     /// Rendering vocabulary.
@@ -203,6 +215,9 @@ pub struct VisualArgs {
     /// Event-driven ember overlay.
     #[arg(long, value_enum, default_value_t)]
     pub particles: ParticleMode,
+    /// Rate-lane projection in the meter view.
+    #[arg(long, value_enum, default_value_t)]
+    pub meter_scale: MeterScale,
     /// Render one plain frame and exit.
     #[arg(long)]
     pub snapshot: bool,
@@ -378,6 +393,21 @@ mod tests {
             };
             assert_eq!(args.visual.theme, expected, "--theme {name}");
         }
+    }
+
+    #[test]
+    fn meter_scale_defaults_to_perceptual_and_linear_is_explicit() {
+        let cli = Cli::try_parse_from(["synesthesia", "proc"]).unwrap();
+        let Command::Proc(args) = cli.command else {
+            panic!("expected proc command");
+        };
+        assert_eq!(args.visual.meter_scale, MeterScale::Perceptual);
+
+        let cli = Cli::try_parse_from(["synesthesia", "proc", "--meter-scale", "linear"]).unwrap();
+        let Command::Proc(args) = cli.command else {
+            panic!("expected proc command");
+        };
+        assert_eq!(args.visual.meter_scale, MeterScale::Linear);
     }
 
     #[test]
